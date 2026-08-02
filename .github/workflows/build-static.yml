@@ -15,10 +15,30 @@ jobs:
       - name: Clean old output
         run: rm -rf output && mkdir -p output
 
-      - name: Mirror the WordPress site
+      - name: Install xmlstarlet
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      - name: Extract URLs from sitemaps
+        run: |
+          SITEMAPS=(
+            "https://payab.ir/ad_cat-sitemap.xml"
+            "https://payab.ir/ads-sitemap.xml"
+            "https://payab.ir/ads-sitemap2.xml"
+            "https://payab.ir/building-news-sitemap.xml"
+            "https://payab.ir/moghararat-sitemap.xml"
+            "https://payab.ir/page-sitemap.xml"
+            "https://payab.ir/post-sitemap.xml"
+            "https://payab.ir/post_tag-sitemap.xml"
+          )
+          echo "https://payab.ir/" > sitemap-urls.txt
+          for sm in "${SITEMAPS[@]}"; do
+            curl -s "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> sitemap-urls.txt || true
+          done
+          echo "Total URLs found: $(wc -l < sitemap-urls.txt)"
+
+      - name: Download all pages from sitemap list
         run: |
           wget \
-            --mirror \
             --page-requisites \
             --adjust-extension \
             --convert-links \
@@ -29,7 +49,7 @@ jobs:
             --timeout=30 \
             --user-agent="Mozilla/5.0 (StaticBackupBot)" \
             --directory-prefix=output \
-            https://payab.ir/
+            --input-file=sitemap-urls.txt
 
       - name: Commit and push changes
         run: |
