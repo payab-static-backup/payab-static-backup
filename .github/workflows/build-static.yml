@@ -48,7 +48,7 @@ jobs:
   download:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 330
     strategy:
       matrix:
         chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
@@ -72,6 +72,14 @@ jobs:
         run: |
           mkdir -p backup
           wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
+
+      - name: Sanitize filenames
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          find backup -depth -name '*[?:<>|*"]*' | while IFS= read -r f; do
+            newname=$(echo "$f" | sed 's/[?:<>|*"]/_/g')
+            mv "$f" "$newname"
+          done
 
       - name: Upload downloaded chunk
         uses: actions/upload-artifact@v4
