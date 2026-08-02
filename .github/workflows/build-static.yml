@@ -6,20 +6,19 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  mirror:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    outputs:
+      chunks: ${{ steps.split.outputs.chunks }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Clean old backup
-        run: rm -rf backup && mkdir -p backup
-
       - name: Install xmlstarlet
         run: sudo apt-get update && sudo apt-get install -y xmlstarlet
 
-      - name: Extract URLs from sitemaps
+      - name: Extract and split URLs
+        id: split
         run: |
           SITEMAPS=(
             "https://payab.ir/ad_cat-sitemap.xml"
@@ -31,11 +30,33 @@ jobs:
             "https://payab.ir/post-sitemap.xml"
             "https://payab.ir/post_tag-sitemap.xml"
           )
-          echo "https://payab.ir/" > sitemap-urls.txt
+          echo "https://payab.ir/" > all-urls.txt
           for sm in "${SITEMAPS[@]}"; do
-            curl -s --max-time 20 "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> sitemap-urls.txt || echo "Warning: failed to fetch $sm"
+            curl -s --max-time 20 "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> all-urls.txt || echo "Warning: failed to fetch $sm"
           done
-          echo "Total URLs found: $(wc -l < sitemap-urls.txt)"
+          echo "Total URLs found: $(wc -l < all-urls.txt)"
+          split -n l/4 -d all-urls.txt url-chunk-
+          for f in url-chunk-*; do mv "$f" "$f.txt"; done
+          echo 'chunks=["0","1","2","3"]' >> "$GITHUB_OUTPUT"
+
+      - name: Upload URL chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-chunks
+          path: url-chunk-*.txt
+
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix:
+        chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
+    steps:
+      - name: Download URL chunks
+        uses: actions/download-artifact@v4
+        with:
+          name: url-chunks
 
       - name: Check if origin site is reachable
         id: check_site
@@ -44,18 +65,43 @@ jobs:
             echo "reachable=true" >> "$GITHUB_OUTPUT"
           else
             echo "reachable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::سایت اصلی در دسترس نیست — بک‌آپ قبلی دست‌نخورده باقی می‌ماند."
           fi
 
-      - name: Download all pages from sitemap list
+      - name: Download this chunk
         if: steps.check_site.outputs.reachable == 'true'
-        continue-on-error: true
         run: |
-          wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=sitemap-urls.txt || true
+          mkdir -p backup
+          wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
+
+      - name: Upload downloaded chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-chunk-${{ matrix.chunk }}
+          path: backup/
+
+  merge:
+    needs: download
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Clean old backup
+        run: rm -rf backup && mkdir -p backup
+
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backup-chunk-*
+          path: merged-chunks
+          merge-multiple: true
+
+      - name: Move merged files into backup
+        run: |
+          cp -r merged-chunks/* backup/ 2>/dev/null || true
 
       - name: Verify backup integrity
         id: verify
-        if: steps.check_site.outputs.reachable == 'true'
         run: |
           chmod +x scripts/verify.sh
           if bash scripts/verify.sh; then
@@ -66,7 +112,7 @@ jobs:
           fi
 
       - name: Commit and push changes
-        if: steps.check_site.outputs.reachable == 'true' && steps.verify.outputs.passed == 'true'
+        if: steps.verify.outputs.passed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
