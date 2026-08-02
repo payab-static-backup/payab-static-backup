@@ -8,6 +8,7 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    timeout-minutes: 120   # حداکثر ۲ ساعت اجازه اجرا، بعدش خودکار متوقف می‌شود
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -32,11 +33,23 @@ jobs:
           )
           echo "https://payab.ir/" > sitemap-urls.txt
           for sm in "${SITEMAPS[@]}"; do
-            curl -s "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> sitemap-urls.txt || true
+            curl -s --max-time 20 "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> sitemap-urls.txt || echo "Warning: failed to fetch $sm"
           done
           echo "Total URLs found: $(wc -l < sitemap-urls.txt)"
 
+      - name: Check if origin site is reachable
+        id: check_site
+        run: |
+          if curl -sSf --max-time 15 -o /dev/null "https://payab.ir/"; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::سایت اصلی در دسترس نیست — احتمالاً اینترنت یا هاست دچار قطعی است. بک‌آپ قبلی دست‌نخورده باقی می‌ماند."
+          fi
+
       - name: Download all pages from sitemap list
+        if: steps.check_site.outputs.reachable == 'true'
+        continue-on-error: true
         run: |
           wget \
             --page-requisites \
@@ -49,9 +62,10 @@ jobs:
             --timeout=30 \
             --user-agent="Mozilla/5.0 (StaticBackupBot)" \
             --directory-prefix=output \
-            --input-file=sitemap-urls.txt
+            --input-file=sitemap-urls.txt || true
 
-      - name: Commit and push changes
+      - name: Commit and push changes (only if new content was fetched)
+        if: steps.check_site.outputs.reachable == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
