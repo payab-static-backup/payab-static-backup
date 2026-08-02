@@ -8,13 +8,13 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 120   # حداکثر ۲ ساعت اجازه اجرا، بعدش خودکار متوقف می‌شود
+    timeout-minutes: 120
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Clean old output
-        run: rm -rf output && mkdir -p output
+      - name: Clean old backup
+        run: rm -rf backup && mkdir -p backup
 
       - name: Install xmlstarlet
         run: sudo apt-get update && sudo apt-get install -y xmlstarlet
@@ -44,7 +44,7 @@ jobs:
             echo "reachable=true" >> "$GITHUB_OUTPUT"
           else
             echo "reachable=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::سایت اصلی در دسترس نیست — احتمالاً اینترنت یا هاست دچار قطعی است. بک‌آپ قبلی دست‌نخورده باقی می‌ماند."
+            echo "::warning::سایت اصلی در دسترس نیست — بک‌آپ قبلی دست‌نخورده باقی می‌ماند."
           fi
 
       - name: Download all pages from sitemap list
@@ -61,14 +61,26 @@ jobs:
             --tries=3 \
             --timeout=30 \
             --user-agent="Mozilla/5.0 (StaticBackupBot)" \
-            --directory-prefix=output \
+            --directory-prefix=backup \
             --input-file=sitemap-urls.txt || true
 
-      - name: Commit and push changes (only if new content was fetched)
+      - name: Verify backup integrity
+        id: verify
         if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          chmod +x scripts/verify.sh
+          if bash scripts/verify.sh; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::error::بررسی سلامت بک‌آپ شکست خورد — این نسخه commit نمی‌شود."
+          fi
+
+      - name: Commit and push changes
+        if: steps.check_site.outputs.reachable == 'true' && steps.verify.outputs.passed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output
+          git add backup
           git diff --quiet && git diff --staged --quiet || git commit -m "Static backup update - $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
