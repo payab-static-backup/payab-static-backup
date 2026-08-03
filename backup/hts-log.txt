@@ -1,0 +1,11 @@
+HTTrack3.49-5 launched on Mon, 03 Aug 2026 11:24:56 at https://payab.ir/ +https://payab.ir/* -*
+(httrack https://payab.ir/ -O backup +https://payab.ir/* -* -r1 -s0 -%k )
+
+Information, Warnings and Errors reported for this mirror:
+note:	the hts-log.txt file, and hts-cache folder, may contain sensitive information,
+	such as username/password authentication for websites mirrored in this project
+	do not share these files/folders if you want these information to remain private
+
+
+HTTrack Website Copier/3.49-5 mirror complete in 2 seconds : 1 links scanned, 1 files written (399512 bytes overall) [42262 bytes received at 21131 bytes/sec], 399512 bytes transferred using HTTP compression in 1 files, ratio 10%
+(No errors, 0 warnings, 0 messages)
