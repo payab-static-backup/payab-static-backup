@@ -1,172 +1,55 @@
-name: Build Static Backup
+name: Test Static Backup
 
 on:
-  schedule:
-    - cron: '0 22 * * 5'
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  prepare:
+  backup:
     runs-on: ubuntu-latest
-    outputs:
-      chunks: ${{ steps.split.outputs.chunks }}
+
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install xmlstarlet
-        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
-
-      - name: Extract and split URLs
-        id: split
+      - name: Install HTTrack
         run: |
-          SITEMAPS=(
-            "https://payab.ir/page-sitemap.xml"
-          )
-          echo "https://payab.ir/" > all-urls.txt
-          for sm in "${SITEMAPS[@]}"; do
-            curl -s --max-time 20 "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> all-urls.txt || echo "Warning: failed to fetch $sm"
-          done
-          echo "Total URLs found: $(wc -l < all-urls.txt)"
-          split -n l/4 -d all-urls.txt url-chunk-
-          for f in url-chunk-*; do mv "$f" "$f.txt"; done
-          echo 'chunks=["0","1","2","3"]' >> "$GITHUB_OUTPUT"
+          sudo apt-get update
+          sudo apt-get install -y httrack
 
-      - name: Upload URL chunks
-        uses: actions/upload-artifact@v4
-        with:
-          name: url-chunks
-          path: url-chunk-*.txt
-
-  download:
-    needs: prepare
-    runs-on: ubuntu-latest
-    timeout-minutes: 330
-    strategy:
-      matrix:
-        chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
-    steps:
-      - name: Download URL chunks
-        uses: actions/download-artifact@v4
-        with:
-          name: url-chunks
-
-      - name: Check if origin site is reachable
-        id: check_site
+      - name: Clean backup
         run: |
-          if curl -sSf --max-time 15 -o /dev/null "https://payab.ir/"; then
-            echo "reachable=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "reachable=false" >> "$GITHUB_OUTPUT"
+          rm -rf backup
+          mkdir backup
+
+      - name: Mirror only homepage
+        run: |
+          httrack "https://payab.ir/" \
+            -O backup \
+            "+https://payab.ir/*" \
+            "-*" \
+            --depth=1 \
+            --robots=0 \
+            --keep-alive
+
+      - name: Remove HTTrack cache
+        run: |
+          rm -rf backup/hts-cache
+          find backup -name "*.tmp" -delete
+
+      - name: Move site to backup root
+        run: |
+          if [ -d backup/payab.ir ]; then
+            cp -r backup/payab.ir/* backup/
+            rm -rf backup/payab.ir
           fi
 
-      - name: Download this chunk
-        if: steps.check_site.outputs.reachable == 'true'
+      - name: Commit
         run: |
-          mkdir -p backup
-          wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
 
-      - name: Fix invalid filenames and matching references
-        if: steps.check_site.outputs.reachable == 'true'
-        run: |
-          python3 << 'PYEOF'
-          import os, re, urllib.parse
-
-          backup_dir = "backup"
-          invalid_chars = re.compile(r'[?:<>|*"]')
-
-          renames = []
-          for root, dirs, files in os.walk(backup_dir):
-              for fname in files:
-                  if invalid_chars.search(fname):
-                      new_name = invalid_chars.sub('_', fname)
-                      old_path = os.path.join(root, fname)
-                      new_path = os.path.join(root, new_name)
-                      renames.append((fname, new_name, old_path, new_path))
-
-          print(f"Found {len(renames)} files to rename")
-
-          text_files = []
-          for root, dirs, files in os.walk(backup_dir):
-              for fname in files:
-                  if fname.lower().endswith(('.html', '.css')):
-                      text_files.append(os.path.join(root, fname))
-
-          for old_name, new_name, old_path, new_path in renames:
-              old_name_encoded = urllib.parse.quote(old_name, safe='')
-              new_name_encoded = urllib.parse.quote(new_name, safe='')
-              old_name_encoded_lower = urllib.parse.quote(old_name, safe='').replace('%3F', '%3f')
-              new_name_encoded_lower = urllib.parse.quote(new_name, safe='').replace('%3F', '%3f')
-
-              for tf in text_files:
-                  try:
-                      with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
-                          content = f.read()
-                      changed = False
-                      if old_name in content:
-                          content = content.replace(old_name, new_name)
-                          changed = True
-                      if old_name_encoded in content:
-                          content = content.replace(old_name_encoded, new_name_encoded)
-                          changed = True
-                      if old_name_encoded_lower in content:
-                          content = content.replace(old_name_encoded_lower, new_name_encoded_lower)
-                          changed = True
-                      if changed:
-                          with open(tf, 'w', encoding='utf-8') as f:
-                              f.write(content)
-                  except Exception:
-                      pass
-
-          for old_name, new_name, old_path, new_path in renames:
-              if os.path.exists(old_path):
-                  os.rename(old_path, new_path)
-
-          print("Done renaming and updating references (including URL-encoded matches)")
-          PYEOF
-
-      - name: Upload downloaded chunk
-        uses: actions/upload-artifact@v4
-        with:
-          name: backup-chunk-${{ matrix.chunk }}
-          path: backup/
-
-  merge:
-    needs: download
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Clean old backup
-        run: rm -rf backup && mkdir -p backup
-
-      - name: Download all chunks
-        uses: actions/download-artifact@v4
-        with:
-          pattern: backup-chunk-*
-          path: merged-chunks
-          merge-multiple: true
-
-      - name: Move merged files into backup
-        run: |
-          cp -r merged-chunks/* backup/ 2>/dev/null || true
-
-      - name: Verify backup integrity (informational only during test)
-        id: verify
-        run: |
-          chmod +x scripts/verify.sh
-          if bash scripts/verify.sh; then
-            echo "passed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "passed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::verify.sh شکست خورد (طبیعی در تست با تعداد کم صفحه)"
-          fi
-
-      - name: Commit and push changes (TEST MODE)
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add backup
-          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v3: handle URL-encoded query strings - $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git push
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Test homepage backup"
+            git push
+          fi
