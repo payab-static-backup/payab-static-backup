@@ -66,19 +66,50 @@ jobs:
           mkdir -p backup
           wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
 
-      - name: Strip query strings from HTML/CSS references
+      - name: Fix invalid filenames and matching references
         if: steps.check_site.outputs.reachable == 'true'
         run: |
-          find backup -type f \( -name "*.html" -o -name "*.css" \) -print0 | \
-          xargs -0 sed -i -E 's/(\.(css|js))\?[^"'"'"')]*/\1/g'
+          python3 << 'PYEOF'
+          import os, re
 
-      - name: Sanitize any remaining invalid filenames
-        if: steps.check_site.outputs.reachable == 'true'
-        run: |
-          find backup -depth -name '*[?:<>|*"]*' | while IFS= read -r f; do
-            newname=$(echo "$f" | sed 's/[?:<>|*"]/_/g')
-            mv "$f" "$newname"
-          done
+          backup_dir = "backup"
+          invalid_chars = re.compile(r'[?:<>|*"]')
+
+          renames = []
+          for root, dirs, files in os.walk(backup_dir):
+              for fname in files:
+                  if invalid_chars.search(fname):
+                      new_name = invalid_chars.sub('_', fname)
+                      old_path = os.path.join(root, fname)
+                      new_path = os.path.join(root, new_name)
+                      renames.append((fname, new_name, old_path, new_path))
+
+          print(f"Found {len(renames)} files to rename")
+
+          text_files = []
+          for root, dirs, files in os.walk(backup_dir):
+              for fname in files:
+                  if fname.lower().endswith(('.html', '.css')):
+                      text_files.append(os.path.join(root, fname))
+
+          for old_name, new_name, old_path, new_path in renames:
+              for tf in text_files:
+                  try:
+                      with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
+                          content = f.read()
+                      if old_name in content:
+                          content = content.replace(old_name, new_name)
+                          with open(tf, 'w', encoding='utf-8') as f:
+                              f.write(content)
+                  except Exception:
+                      pass
+
+          for old_name, new_name, old_path, new_path in renames:
+              if os.path.exists(old_path):
+                  os.rename(old_path, new_path)
+
+          print("Done renaming and updating references")
+          PYEOF
 
       - name: Upload downloaded chunk
         uses: actions/upload-artifact@v4
@@ -115,13 +146,13 @@ jobs:
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::verify.sh شکست خورد (طبیعی است چون این یک تست با تعداد کم صفحه است) — ولی commit در حالت تست انجام می‌شود."
+            echo "::warning::verify.sh شکست خورد (طبیعی است در تست با تعداد کم صفحه)"
           fi
 
-      - name: Commit and push changes (TEST MODE - ignores verify result)
+      - name: Commit and push changes (TEST MODE)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add backup
-          git diff --quiet && git diff --staged --quiet || git commit -m "TEST backup update - $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v2 backup update - $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
