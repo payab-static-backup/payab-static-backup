@@ -73,7 +73,13 @@ jobs:
           mkdir -p backup
           wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
 
-      - name: Sanitize filenames
+      - name: Strip query strings from HTML/CSS references
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          find backup -type f \( -name "*.html" -o -name "*.css" \) -print0 | \
+          xargs -0 sed -i -E 's/(\.(css|js))\?[^"'"'"')]*/\1/g'
+
+      - name: Sanitize any remaining invalid filenames
         if: steps.check_site.outputs.reachable == 'true'
         run: |
           find backup -depth -name '*[?:<>|*"]*' | while IFS= read -r f; do
