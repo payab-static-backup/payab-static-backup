@@ -70,7 +70,7 @@ jobs:
         if: steps.check_site.outputs.reachable == 'true'
         run: |
           python3 << 'PYEOF'
-          import os, re
+          import os, re, urllib.parse
 
           backup_dir = "backup"
           invalid_chars = re.compile(r'[?:<>|*"]')
@@ -93,12 +93,26 @@ jobs:
                       text_files.append(os.path.join(root, fname))
 
           for old_name, new_name, old_path, new_path in renames:
+              old_name_encoded = urllib.parse.quote(old_name, safe='')
+              new_name_encoded = urllib.parse.quote(new_name, safe='')
+              old_name_encoded_lower = urllib.parse.quote(old_name, safe='').replace('%3F', '%3f')
+              new_name_encoded_lower = urllib.parse.quote(new_name, safe='').replace('%3F', '%3f')
+
               for tf in text_files:
                   try:
                       with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
                           content = f.read()
+                      changed = False
                       if old_name in content:
                           content = content.replace(old_name, new_name)
+                          changed = True
+                      if old_name_encoded in content:
+                          content = content.replace(old_name_encoded, new_name_encoded)
+                          changed = True
+                      if old_name_encoded_lower in content:
+                          content = content.replace(old_name_encoded_lower, new_name_encoded_lower)
+                          changed = True
+                      if changed:
                           with open(tf, 'w', encoding='utf-8') as f:
                               f.write(content)
                   except Exception:
@@ -108,7 +122,7 @@ jobs:
               if os.path.exists(old_path):
                   os.rename(old_path, new_path)
 
-          print("Done renaming and updating references")
+          print("Done renaming and updating references (including URL-encoded matches)")
           PYEOF
 
       - name: Upload downloaded chunk
@@ -146,7 +160,7 @@ jobs:
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::verify.sh شکست خورد (طبیعی است در تست با تعداد کم صفحه)"
+            echo "::warning::verify.sh شکست خورد (طبیعی در تست با تعداد کم صفحه)"
           fi
 
       - name: Commit and push changes (TEST MODE)
@@ -154,5 +168,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add backup
-          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v2 backup update - $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v3: handle URL-encoded query strings - $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
