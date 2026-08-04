@@ -81,6 +81,12 @@ jobs:
             mv "$f" "$newname"
           done
 
+      - name: Force all internal links to relative paths
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          find backup -type f -name "*.html" -print0 | \
+          xargs -0 sed -i -E 's#https?://(www\.)?payab\.ir/#/#g'
+
       - name: Upload downloaded chunk
         uses: actions/upload-artifact@v4
         with:
