@@ -66,67 +66,55 @@ jobs:
           mkdir -p backup
           wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
 
-      - name: Fix invalid filenames and matching references (HTML+CSS+JS)
+      - name: Strip query strings from filenames and references (regex-based)
         if: steps.check_site.outputs.reachable == 'true'
         run: |
           python3 << 'PYEOF'
-          import os, re, urllib.parse
+          import os, re
 
           backup_dir = "backup"
-          invalid_chars = re.compile(r'[?:<>|*"]')
+          qs_pattern = re.compile(r'(\.(css|js))(\?|%3[Ff])[^"\'\s)>]*', re.IGNORECASE)
 
-          renames = []
+          renamed = 0
           for root, dirs, files in os.walk(backup_dir):
               for fname in files:
-                  if invalid_chars.search(fname):
-                      new_name = invalid_chars.sub('_', fname)
+                  new_name = qs_pattern.sub(r'\1', fname)
+                  if new_name != fname:
                       old_path = os.path.join(root, fname)
                       new_path = os.path.join(root, new_name)
-                      renames.append((fname, new_name, old_path, new_path))
+                      if not os.path.exists(new_path):
+                          os.rename(old_path, new_path)
+                          renamed += 1
 
-          print(f"Found {len(renames)} files to rename")
+          print(f"Renamed {renamed} files (stripped query strings)")
 
-          text_files = []
+          text_exts = ('.html', '.css', '.js')
+          fixed_refs = 0
           for root, dirs, files in os.walk(backup_dir):
               for fname in files:
-                  if fname.lower().endswith(('.html', '.css', '.js')):
-                      text_files.append(os.path.join(root, fname))
+                  if fname.lower().endswith(text_exts):
+                      fpath = os.path.join(root, fname)
+                      try:
+                          with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                              content = f.read()
+                          new_content = qs_pattern.sub(r'\1', content)
+                          if new_content != content:
+                              with open(fpath, 'w', encoding='utf-8') as f:
+                                  f.write(new_content)
+                              fixed_refs += 1
+                      except Exception as e:
+                          print(f"Warning: {fpath}: {e}")
 
-          print(f"Scanning {len(text_files)} html/css/js files for references")
-
-          for old_name, new_name, old_path, new_path in renames:
-              old_upper = urllib.parse.quote(old_name, safe='')
-              new_upper = urllib.parse.quote(new_name, safe='')
-              old_lower = old_upper.replace('%3F', '%3f')
-              new_lower = new_upper.replace('%3F', '%3f')
-
-              variants = [
-                  (old_name, new_name),
-                  (old_upper, new_upper),
-                  (old_lower, new_lower),
-              ]
-
-              for tf in text_files:
-                  try:
-                      with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
-                          content = f.read()
-                      changed = False
-                      for old_v, new_v in variants:
-                          if old_v in content:
-                              content = content.replace(old_v, new_v)
-                              changed = True
-                      if changed:
-                          with open(tf, 'w', encoding='utf-8') as f:
-                              f.write(content)
-                  except Exception as e:
-                      print(f"Warning: could not process {tf}: {e}")
-
-          for old_name, new_name, old_path, new_path in renames:
-              if os.path.exists(old_path):
-                  os.rename(old_path, new_path)
-
-          print("Done renaming and updating references (HTML+CSS+JS, raw+encoded)")
+          print(f"Fixed references in {fixed_refs} files")
           PYEOF
+
+      - name: Sanitize any remaining invalid filenames
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          find backup -depth -name '*[?:<>|*"]*' | while IFS= read -r f; do
+            newname=$(echo "$f" | sed 's/[?:<>|*"]/_/g')
+            mv "$f" "$newname"
+          done
 
       - name: Force all internal links to relative paths
         if: steps.check_site.outputs.reachable == 'true'
@@ -169,7 +157,7 @@ jobs:
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::verify.sh شکست خورد (طبیعی در تست با تعداد کم صفحه)"
+            echo "::warning::verify.sh شکست خورد (طبیعی در تست)"
           fi
 
       - name: Commit and push changes (TEST MODE)
@@ -177,5 +165,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add backup
-          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v5: full HTML+CSS+JS query-string fix - $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v6: strip query strings entirely via regex - $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
