@@ -66,13 +66,67 @@ jobs:
           mkdir -p backup
           wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
 
-      - name: Sanitize filenames
+      - name: Fix invalid filenames and matching references (HTML+CSS+JS)
         if: steps.check_site.outputs.reachable == 'true'
         run: |
-          find backup -depth -name '*[?:<>|*"]*' | while IFS= read -r f; do
-            newname=$(echo "$f" | sed 's/[?:<>|*"]/_/g')
-            mv "$f" "$newname"
-          done
+          python3 << 'PYEOF'
+          import os, re, urllib.parse
+
+          backup_dir = "backup"
+          invalid_chars = re.compile(r'[?:<>|*"]')
+
+          renames = []
+          for root, dirs, files in os.walk(backup_dir):
+              for fname in files:
+                  if invalid_chars.search(fname):
+                      new_name = invalid_chars.sub('_', fname)
+                      old_path = os.path.join(root, fname)
+                      new_path = os.path.join(root, new_name)
+                      renames.append((fname, new_name, old_path, new_path))
+
+          print(f"Found {len(renames)} files to rename")
+
+          text_files = []
+          for root, dirs, files in os.walk(backup_dir):
+              for fname in files:
+                  if fname.lower().endswith(('.html', '.css', '.js')):
+                      text_files.append(os.path.join(root, fname))
+
+          print(f"Scanning {len(text_files)} html/css/js files for references")
+
+          for old_name, new_name, old_path, new_path in renames:
+              old_upper = urllib.parse.quote(old_name, safe='')
+              new_upper = urllib.parse.quote(new_name, safe='')
+              old_lower = old_upper.replace('%3F', '%3f')
+              new_lower = new_upper.replace('%3F', '%3f')
+
+              variants = [
+                  (old_name, new_name),
+                  (old_upper, new_upper),
+                  (old_lower, new_lower),
+              ]
+
+              for tf in text_files:
+                  try:
+                      with open(tf, 'r', encoding='utf-8', errors='ignore') as f:
+                          content = f.read()
+                      changed = False
+                      for old_v, new_v in variants:
+                          if old_v in content:
+                              content = content.replace(old_v, new_v)
+                              changed = True
+                      if changed:
+                          with open(tf, 'w', encoding='utf-8') as f:
+                              f.write(content)
+                  except Exception as e:
+                      print(f"Warning: could not process {tf}: {e}")
+
+          for old_name, new_name, old_path, new_path in renames:
+              if os.path.exists(old_path):
+                  os.rename(old_path, new_path)
+
+          print("Done renaming and updating references (HTML+CSS+JS, raw+encoded)")
+          PYEOF
 
       - name: Force all internal links to relative paths
         if: steps.check_site.outputs.reachable == 'true'
@@ -123,5 +177,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add backup
-          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v4: relative links fix - $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v5: full HTML+CSS+JS query-string fix - $(date -u +'%Y-%m-%d %H:%M UTC')"
           git push
