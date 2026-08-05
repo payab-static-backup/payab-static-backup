@@ -1,68 +1,127 @@
-name: Fast Static Backup (Test)
+name: Build Static Backup
 
 on:
-  workflow_dispatch:
+  schedule:
+    - cron: '0 22 * * 5'
+  workflow_dispatch: {}
 
 jobs:
-  backup:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    outputs:
+      chunks: ${{ steps.split.outputs.chunks }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Install tools
+      - name: Install xmlstarlet
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      - name: Extract and split URLs
+        id: split
         run: |
-          sudo apt-get update
-          sudo apt-get install -y xmlstarlet parallel wget
+          SITEMAPS=(
+            "https://payab.ir/page-sitemap.xml"
+          )
+          echo "https://payab.ir/" > all-urls.txt
+          for sm in "${SITEMAPS[@]}"; do
+            curl -s --max-time 20 "$sm" | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n >> all-urls.txt || echo "Warning: failed to fetch $sm"
+          done
+          echo "Total URLs found: $(wc -l < all-urls.txt)"
+          split -n l/4 -d all-urls.txt url-chunk-
+          for f in url-chunk-*; do mv "$f" "$f.txt"; done
+          echo 'chunks=["0","1","2","3"]' >> "$GITHUB_OUTPUT"
 
-      - name: Clean backup
+      - name: Upload URL chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-chunks
+          path: url-chunk-*.txt
+
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      matrix:
+        chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
+    steps:
+      - name: Download URL chunks
+        uses: actions/download-artifact@v4
+        with:
+          name: url-chunks
+
+      - name: Check if origin site is reachable
+        id: check_site
         run: |
-          rm -rf backup
-          mkdir -p backup
-
-      - name: Get first 10 sitemap URLs
-        run: |
-          curl -fsSL https://payab.ir/page-sitemap.xml \
-            | xmlstarlet sel \
-                -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
-                -t -m "//x:loc" -v . -n \
-            | head -10 > urls.txt
-
-          echo "https://payab.ir/" >> urls.txt
-          sort -u urls.txt -o urls.txt
-
-          cat urls.txt
-
-      - name: Download in parallel
-        run: |
-          cat urls.txt | parallel -j4 '
-            wget \
-              --page-requisites \
-              --convert-links \
-              --adjust-extension \
-              --no-parent \
-              --directory-prefix=backup \
-              "{}" || true
-          '
-
-      - name: Show result
-        run: |
-          find backup | head -200
-
-      - name: Commit
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email github-actions[bot]@users.noreply.github.com
-
-          git add backup
-
-          if git diff --cached --quiet; then
-            echo "No changes"
-            exit 0
+          if curl -sSf --max-time 15 -o /dev/null "https://payab.ir/"; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
           fi
 
-          git commit -m "Fast static backup test"
+      - name: Download this chunk
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          mkdir -p backup
+          wget --page-requisites --adjust-extension --convert-links --no-parent --wait=1 --random-wait --tries=2 --dns-timeout=15 --connect-timeout=15 --read-timeout=20 --reject-regex="-(300x[0-9]+|768x[0-9]+|1024x[0-9]+|1536x[0-9]+|2048x[0-9]+)\.(webp|jpg|jpeg|png)$" --user-agent="Mozilla/5.0 (StaticBackupBot)" --directory-prefix=backup --input-file=url-chunk-0${{ matrix.chunk }}.txt || true
 
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin HEAD
+      - name: Sanitize filenames
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          find backup -depth -name '*[?:<>|*"]*' | while IFS= read -r f; do
+            newname=$(echo "$f" | sed 's/[?:<>|*"]/_/g')
+            mv "$f" "$newname"
+          done
+
+      - name: Force all internal links to relative paths
+        if: steps.check_site.outputs.reachable == 'true'
+        run: |
+          find backup -type f -name "*.html" -print0 | \
+          xargs -0 sed -i -E 's#https?://(www\.)?payab\.ir/#/#g'
+
+      - name: Upload downloaded chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-chunk-${{ matrix.chunk }}
+          path: backup/
+
+  merge:
+    needs: download
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Clean old backup
+        run: rm -rf backup && mkdir -p backup
+
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backup-chunk-*
+          path: merged-chunks
+          merge-multiple: true
+
+      - name: Move merged files into backup
+        run: |
+          cp -r merged-chunks/* backup/ 2>/dev/null || true
+
+      - name: Verify backup integrity (informational only during test)
+        id: verify
+        run: |
+          chmod +x scripts/verify.sh
+          if bash scripts/verify.sh; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::verify.sh شکست خورد (طبیعی در تست با تعداد کم صفحه)"
+          fi
+
+      - name: Commit and push changes (TEST MODE)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add backup
+          git diff --quiet && git diff --staged --quiet || git commit -m "TEST v4: relative links fix - $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push
