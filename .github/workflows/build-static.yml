@@ -1,59 +1,361 @@
-- name: Download this chunk
-  if: steps.check_site.outputs.reachable == 'true'
-  run: |
-    mkdir -p backup
+name: Build Static Backup (Test)
 
-    wget \
-      --mirror \
-      --page-requisites \
-      --convert-links \
-      --adjust-extension \
-      --execute robots=off \
-      --no-parent \
-      --wait=1 \
-      --random-wait \
-      --tries=3 \
-      --dns-timeout=20 \
-      --connect-timeout=20 \
-      --read-timeout=30 \
-      --user-agent="Mozilla/5.0 (StaticBackupBot)" \
-      --directory-prefix=backup \
-      --input-file=url-chunk-0${{ matrix.chunk }}.txt
+on:
+  schedule:
+    - cron: '0 22 * * 5'
+  workflow_dispatch:
 
-- name: Debug downloaded files
-  if: steps.check_site.outputs.reachable == 'true'
-  run: |
-    echo "========== wp-content =========="
-    find backup -type d -path "*wp-content*" | sort
+permissions:
+  contents: write
 
-    echo
-    echo "========== plugins =========="
-    find backup -type d -path "*wp-content/plugins*" | sort
+env:
+  SITE: https://payab.ir
+  OUTPUT: backup
 
-    echo
-    echo "========== elementor =========="
-    find backup -path "*elementor*" | head -100
+jobs:
 
-    echo
-    echo "========== frontend.min.css =========="
-    find backup -name "frontend.min.css"
+  prepare:
+    runs-on: ubuntu-latest
 
-    echo
-    echo "========== frontend-rtl.min.css =========="
-    find backup -name "frontend-rtl.min.css"
+    outputs:
+      chunks: ${{ steps.split.outputs.chunks }}
 
-    echo
-    echo "========== CSS count =========="
-    find backup -name "*.css" | wc -l
+    steps:
 
-- name: Verify Elementor assets
-  if: steps.check_site.outputs.reachable == 'true'
-  run: |
-    if [ ! -f backup/payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css ]; then
-      echo "::error::Elementor frontend.min.css was NOT downloaded"
-      exit 1
-    fi
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    if [ ! -f backup/payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.min.css ]; then
-      echo "::warning::frontend-rtl.min.css not found"
-    fi
+      - name: Install packages
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            httrack \
+            xmlstarlet \
+            tree
+
+      - name: Read sitemaps
+        id: split
+
+        shell: bash
+
+        run: |
+
+          rm -f all-urls.txt
+
+          echo "${SITE}/" > all-urls.txt
+
+          # فقط از page-sitemap.xml استفاده می‌کنیم
+          SITEMAPS=(
+            "page-sitemap.xml"
+          )
+
+          for sm in "${SITEMAPS[@]}"
+          do
+
+            echo "Reading $sm"
+
+            curl -L -s "${SITE}/${sm}" \
+            | xmlstarlet sel \
+                -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
+                -t \
+                -v "//x:loc" \
+                -n \
+            >> all-urls.txt || true
+
+          done
+
+          sort -u all-urls.txt -o all-urls.txt
+
+          echo "========================="
+          echo "Collected URLs"
+          echo "========================="
+
+          wc -l all-urls.txt
+
+          # برای تست، تعداد chunk‌ها را به ۲ کاهش می‌دهیم
+          split -n l/2 -d all-urls.txt chunk-
+
+          for f in chunk-* ; do
+            mv "$f" "$f.txt"
+          done
+
+          echo 'chunks=["0","1"]' >> "$GITHUB_OUTPUT"
+
+      - name: Upload URL chunks
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: url-chunks
+
+          path: chunk-*.txt
+
+#############################################################
+
+  download:
+
+    needs: prepare
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 360
+
+    strategy:
+
+      fail-fast: false
+
+      matrix:
+
+        chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
+
+    steps:
+
+      - name: Download chunk list
+
+        uses: actions/download-artifact@v4
+
+        with:
+
+          name: url-chunks
+
+      - name: Install HTTrack
+
+        run: |
+
+          sudo apt-get update
+
+          sudo apt-get install -y httrack tree
+
+      - name: Download website
+
+        shell: bash
+
+        run: |
+
+          mkdir -p "${OUTPUT}"
+
+          URLFILE="chunk-0${{ matrix.chunk }}.txt"
+
+          while read URL
+
+          do
+
+            echo "===================================="
+            echo "$URL"
+            echo "===================================="
+
+            httrack \
+              "$URL" \
+              -O "${OUTPUT}" \
+              "+*.payab.ir/*" \
+              "+*.payab-static-backup.pages.dev/*" \
+              "+*.cloudflare.com/*" \
+              "+*.cloudflareinsights.com/*" \
+              "+*.googleapis.com/*" \
+              "+*.gstatic.com/*" \
+              "+*.jsdelivr.net/*" \
+              "+*.bootstrapcdn.com/*" \
+              "+*.fontawesome.com/*" \
+              "+*.fonts.googleapis.com/*" \
+              "+*.fonts.gstatic.com/*" \
+              "+*.woff*" \
+              "+*.woff2*" \
+              "+*.ttf*" \
+              "+*.css*" \
+              "+*.js*" \
+              "+*.jpg*" \
+              "+*.jpeg*" \
+              "+*.png*" \
+              "+*.webp*" \
+              "+*.svg*" \
+              "+*.gif*" \
+              "+*.ico*" \
+              "+*.json*" \
+              --robots=0 \
+              --keep-links=0 \
+              --near \
+              --ext-depth=5 \
+              --depth=5 \
+              --sockets=4 \
+              --connection-per-second=2 \
+              --disable-security-limits \
+              || true
+
+          done < "$URLFILE"
+
+      - name: Debug downloaded files
+
+        shell: bash
+
+        run: |
+
+          echo "==============================="
+          echo "Backup Tree"
+          echo "==============================="
+
+          tree -L 4 "${OUTPUT}" || true
+
+          echo
+          echo "==============================="
+          echo "Downloaded HTML files"
+          echo "==============================="
+
+          find "${OUTPUT}" -name "*.html" | head -20 || true
+
+          echo
+          echo "==============================="
+          echo "Total HTML files"
+          echo "==============================="
+
+          find "${OUTPUT}" -name "*.html" | wc -l
+
+      - name: Upload Chunk
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: backup-chunk-${{ matrix.chunk }}
+
+          path: backup/
+
+##############################################################
+
+  merge:
+
+    needs: download
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Prepare folders
+
+        run: |
+
+          rm -rf backup
+
+          mkdir backup
+
+      - name: Download Artifacts
+
+        uses: actions/download-artifact@v4
+
+        with:
+
+          pattern: backup-chunk-*
+
+          merge-multiple: true
+
+          path: backup
+
+      - name: Remove HTTrack Cache
+
+        shell: bash
+
+        run: |
+
+          find backup -name "hts-cache*" -exec rm -rf {} +
+
+          find backup -name "*.tmp" -delete
+
+          find backup -name "*.lock" -delete
+
+      - name: Fix absolute links
+        shell: bash
+        run: |
+          find backup -type f -name "*.html" -print0 |
+          xargs -0 sed -i \
+            -e 's#https://payab.ir#/#g' \
+            -e 's#http://payab.ir#/#g'
+
+      - name: Show statistics
+
+        shell: bash
+
+        run: |
+
+          echo "==============================="
+          echo "FINAL REPORT"
+          echo "==============================="
+
+          echo "HTML files:"
+          find backup -name "*.html" | wc -l
+
+          echo
+          echo "CSS files:"
+          find backup -name "*.css" | wc -l
+
+          echo
+          echo "JS files:"
+          find backup -name "*.js" | wc -l
+
+          echo
+          echo "Images:"
+          find backup \( \
+            -iname "*.jpg" -o \
+            -iname "*.jpeg" -o \
+            -iname "*.png" -o \
+            -iname "*.gif" -o \
+            -iname "*.svg" -o \
+            -iname "*.webp" \
+          \) | wc -l
+
+      - name: Verify downloaded website
+
+        shell: bash
+
+        run: |
+
+          echo "==============================="
+          echo "VERIFY WEBSITE"
+          echo "==============================="
+
+          HTML_COUNT=$(find backup -name "*.html" | wc -l)
+
+          echo "HTML : $HTML_COUNT"
+
+          if [ "$HTML_COUNT" -lt 1 ]; then
+            echo "::error::No HTML files downloaded!"
+            exit 1
+          fi
+
+          echo "✅ Test successful!"
+
+      - name: Commit backup (optional - برای تست غیرفعال می‌کنیم)
+
+        shell: bash
+
+        run: |
+
+          echo "Test mode: Skipping commit"
+
+          # اگر می‌خواهید برای تست کامیت نشود، این بخش کامنت شده است
+
+          # git config user.name "github-actions[bot]"
+          # git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 
+          # git add backup
+          # 
+          # if git diff --cached --quiet
+          # then
+          #   echo "No changes."
+          #   exit 0
+          # fi
+          # 
+          # git commit -m "Static backup (test) $(date -u '+%Y-%m-%d %H:%M UTC')"
+          # git push
+
+      - name: Finished
+
+        run: |
+
+          echo "==============================="
+          echo "✅ TEST BACKUP COMPLETED"
+          echo "==============================="
+          echo "Only page-sitemap.xml was used"
+          echo "Check the artifacts for results"
