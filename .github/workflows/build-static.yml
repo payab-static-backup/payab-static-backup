@@ -1,6 +1,97 @@
-      - name: Create scraper script
+name: Build Static Backup
+
+on:
+  schedule:
+    - cron: '0 22 * * 5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SITE: https://payab.ir
+  OUTPUT: backup
+  MAX_RETRIES: 3
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      chunks: ${{ steps.split.outputs.chunks }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      - name: Collect URLs
+        id: split
+        shell: bash
         run: |
-          cat > scrape.js << 'SCRIPT'
+          rm -f all-urls.txt
+          echo "${SITE}/" > all-urls.txt
+
+          curl -L -s --retry 3 "${SITE}/page-sitemap.xml" \
+            | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
+            >> all-urls.txt || true
+
+          grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
+            | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
+            | sort -u > clean-urls.txt
+          mv clean-urls.txt all-urls.txt
+
+          echo "Total URLs: $(wc -l < all-urls.txt)"
+          cat all-urls.txt
+
+          TOTAL=$(wc -l < all-urls.txt)
+          if [ "$TOTAL" -le 8 ]; then
+            cp all-urls.txt chunk-00.txt
+            echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
+          else
+            split -n l/8 -d all-urls.txt chunk-
+            for f in chunk-*; do mv "$f" "$f.txt"; done
+            echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-chunks
+          path: chunk-*.txt
+          retention-days: 1
+
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download chunk list
+        uses: actions/download-artifact@v4
+        with:
+          name: url-chunks
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Create scraper
+        run: |
+          cat > scrape.js << 'ENDOFSCRIPT'
           const { chromium } = require('playwright');
           const fs = require('fs');
           const path = require('path');
@@ -13,100 +104,69 @@
           const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3');
 
           const urlFile = `chunk-0${CHUNK}.txt`;
-          const urls = fs.readFileSync(urlFile, 'utf8')
-            .split('\n')
-            .map(u => u.trim())
-            .filter(u => u && u.startsWith('http'));
-
+          const urls = fs.readFileSync(urlFile, 'utf8').split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
           console.log(`Chunk ${CHUNK}: ${urls.length} URLs`);
 
-          const downloadedAssets = new Set();
-          const failedAssets = [];
+          const downloaded = new Set();
+          const failed = [];
 
-          function ensureDir(dir) {
-            fs.mkdirSync(dir, { recursive: true });
-          }
+          function ensureDir(d) { fs.mkdirSync(d, { recursive: true }); }
 
-          // مسیر محلی بدون query string
-          function urlToLocalPath(assetUrl) {
+          function toLocal(assetUrl) {
             try {
-              const u = new URL(assetUrl);
+              const u = new URL(assetUrl.split('?')[0]);
               let p = u.pathname;
               if (p.endsWith('/')) p += 'index.html';
               return path.join(OUTPUT, p.replace(/^\//, ''));
-            } catch {
-              return null;
-            }
+            } catch { return null; }
           }
 
-          async function downloadAsset(assetUrl, retries = MAX_RETRIES) {
-            // حذف query برای جلوگیری از دانلود تکراری
-            const cleanUrl = assetUrl.split('?')[0];
-            if (downloadedAssets.has(cleanUrl)) return;
-            downloadedAssets.add(cleanUrl);
+          async function downloadAsset(assetUrl) {
+            const clean = assetUrl.split('?')[0];
+            if (downloaded.has(clean)) return;
+            downloaded.add(clean);
 
-            const localPath = urlToLocalPath(cleanUrl);
-            if (!localPath) return;
+            const local = toLocal(clean);
+            if (!local) return;
 
-            // فقط دامنه اصلی + CDNهای مجاز
-            if (!cleanUrl.includes('payab.ir') &&
-                !cleanUrl.includes('googleapis.com') &&
-                !cleanUrl.includes('gstatic.com') &&
-                !cleanUrl.includes('cloudflare') &&
-                !cleanUrl.includes('jsdelivr') &&
-                !cleanUrl.includes('fontawesome') &&
-                !cleanUrl.includes('bootstrapcdn')) {
-              return;
-            }
+            if (!clean.includes('payab.ir') && !clean.includes('googleapis.com') &&
+                !clean.includes('gstatic.com') && !clean.includes('jsdelivr') &&
+                !clean.includes('fontawesome') && !clean.includes('bootstrapcdn')) return;
 
-            ensureDir(path.dirname(localPath));
+            ensureDir(path.dirname(local));
+            if (fs.existsSync(local) && fs.statSync(local).size > 0) return;
 
-            // اگر قبلاً فایل وجود دارد، رد شو
-            if (fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
-              return;
-            }
-
-            for (let i = 0; i < retries; i++) {
+            for (let i = 0; i < MAX_RETRIES; i++) {
               try {
-                const protocol = cleanUrl.startsWith('https') ? https : http;
+                const proto = clean.startsWith('https') ? https : http;
                 await new Promise((resolve, reject) => {
-                  const req = protocol.get(cleanUrl, { timeout: 25000 }, (res) => {
+                  const req = proto.get(clean, { timeout: 25000 }, res => {
                     if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                      downloadAsset(res.headers.location, retries).then(resolve).catch(reject);
+                      downloadAsset(res.headers.location).then(resolve).catch(reject);
                       return;
                     }
-                    if (res.statusCode !== 200) {
-                      reject(new Error(`HTTP ${res.statusCode}`));
-                      return;
-                    }
-                    const file = fs.createWriteStream(localPath);
+                    if (res.statusCode !== 200) return reject(new Error('HTTP ' + res.statusCode));
+                    const file = fs.createWriteStream(local);
                     res.pipe(file);
-                    file.on('finish', () => {
-                      file.close();
-                      resolve();
-                    });
+                    file.on('finish', () => { file.close(); resolve(); });
                   });
                   req.on('error', reject);
-                  req.on('timeout', () => {
-                    req.destroy();
-                    reject(new Error('Timeout'));
-                  });
+                  req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
                 });
-                console.log(`  ✓ Asset: ${cleanUrl}`);
+                console.log('  ✓ ' + clean);
                 return;
-              } catch (err) {
-                if (i === retries - 1) {
-                  console.log(`  ✗ Failed: ${cleanUrl} → ${err.message}`);
-                  failedAssets.push(cleanUrl);
+              } catch (e) {
+                if (i === MAX_RETRIES - 1) {
+                  console.log('  ✗ ' + clean + ' → ' + e.message);
+                  failed.push(clean);
                 } else {
-                  await new Promise(r => setTimeout(r, 1200 * (i + 1)));
+                  await new Promise(r => setTimeout(r, 1000 * (i + 1)));
                 }
               }
             }
           }
 
-          // لیست فایل‌های حیاتی که حتماً باید دانلود شوند
-          const criticalAssets = [
+          const critical = [
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css',
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css',
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.css',
@@ -117,140 +177,179 @@
             'https://payab.ir/wp-content/plugins/elementor/assets/css/widget-heading-rtl.min.css',
             'https://payab.ir/wp-content/plugins/elementor/assets/css/widget-accordion-rtl.min.css',
             'https://payab.ir/wp-content/plugins/elementor/assets/css/widget-icon-list-rtl.min.css',
-            'https://payab.ir/wp-includes/js/jquery/jquery.min.js',
-            'https://payab.ir/wp-includes/js/jquery/jquery.js',
+            'https://payab.ir/wp-includes/js/jquery/jquery.min.js'
           ];
 
           (async () => {
-            // اول فایل‌های حیاتی را دانلود کن
-            console.log('Downloading critical assets first...');
-            for (const asset of criticalAssets) {
-              await downloadAsset(asset);
-            }
+            console.log('Downloading critical assets...');
+            for (const a of critical) await downloadAsset(a);
 
-            const browser = await chromium.launch({
-              headless: true,
-              args: ['--no-sandbox', '--disable-setuid-sandbox']
-            });
-
+            const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
             const context = await browser.newContext({
               userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
               viewport: { width: 1920, height: 1080 },
               locale: 'fa-IR'
             });
 
-            // جمع‌آوری assetها از شبکه
-            context.on('response', async (response) => {
+            context.on('response', async (res) => {
               try {
-                const url = response.url();
-                const ct = (response.headers()['content-type'] || '').toLowerCase();
-                if (
-                  response.ok() &&
-                  (ct.includes('css') ||
-                   ct.includes('javascript') ||
-                   ct.includes('font') ||
-                   ct.includes('image') ||
-                   url.match(/\.(css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico)(\?|$)/i))
-                ) {
+                const url = res.url();
+                const ct = (res.headers()['content-type'] || '').toLowerCase();
+                if (res.ok() && (ct.includes('css') || ct.includes('javascript') || ct.includes('font') ||
+                    ct.includes('image') || url.match(/\.(css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico)(\?|$)/i))) {
                   await downloadAsset(url);
                 }
               } catch {}
             });
 
             for (const pageUrl of urls) {
-              console.log(`\n========== Rendering: ${pageUrl} ==========`);
-              let success = false;
-
+              console.log('\n=== Rendering: ' + pageUrl + ' ===');
+              let ok = false;
               for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 try {
                   const page = await context.newPage();
-
-                  await page.goto(pageUrl, {
-                    waitUntil: 'networkidle',
-                    timeout: 60000
-                  });
-
-                  // صبر برای اجرای کامل Elementor
+                  await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
                   await page.waitForTimeout(5000);
 
-                  // اسکرول برای لود lazy-load
                   await page.evaluate(async () => {
                     await new Promise(resolve => {
-                      let total = 0;
-                      const dist = 500;
-                      const timer = setInterval(() => {
-                        window.scrollBy(0, dist);
-                        total += dist;
-                        if (total >= document.body.scrollHeight) {
-                          clearInterval(timer);
+                      let t = 0;
+                      const id = setInterval(() => {
+                        window.scrollBy(0, 500);
+                        t += 500;
+                        if (t >= document.body.scrollHeight) {
+                          clearInterval(id);
                           window.scrollTo(0, 0);
                           resolve();
                         }
                       }, 150);
                     });
                   });
-
-                  await page.waitForTimeout(2500);
+                  await page.waitForTimeout(2000);
 
                   let html = await page.content();
-
-                  // ===== مهم‌ترین بخش: پاکسازی لینک‌ها =====
-                  // 1. حذف دامنه
-                  html = html
-                    .replace(/https?:\/\/payab\.ir\//g, '/')
-                    .replace(/https?:\/\/www\.payab\.ir\//g, '/');
-
-                  // 2. حذف تمام query string از فایل‌های استاتیک (css, js, font, image)
-                  html = html.replace(
-                    /(\/(?:wp-content|wp-includes)\/[^"'?\s]+?\.(?:css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico))\?[^"'>\s]*/gi,
-                    '$1'
-                  );
-
-                  // 3. حالت‌های دیگر query string
-                  html = html.replace(
-                    /(src|href)=["']([^"']+\.(?:css|js|woff2?|ttf|eot|png|jpg|jpeg|gif|webp|svg|ico))\?[^"']*["']/gi,
-                    '$1="$2"'
-                  );
+                  html = html.replace(/https?:\/\/payab\.ir\//g, '/').replace(/https?:\/\/www\.payab\.ir\//g, '/');
+                  html = html.replace(/(\/(?:wp-content|wp-includes)\/[^"'?\s]+?\.(?:css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico))\?[^"'>\s]*/gi, '$1');
+                  html = html.replace(/(src|href)=["']([^"']+\.(?:css|js|woff2?|ttf|eot|png|jpg|jpeg|gif|webp|svg|ico))\?[^"']*["']/gi, '$1="$2"');
 
                   const u = new URL(pageUrl);
-                  let localPath = path.join(OUTPUT, u.pathname.replace(/^\//, ''));
-                  if (localPath.endsWith('/') || !path.extname(localPath)) {
-                    localPath = path.join(localPath, 'index.html');
-                  } else if (!localPath.endsWith('.html')) {
-                    localPath += '.html';
-                  }
+                  let local = path.join(OUTPUT, u.pathname.replace(/^\//, ''));
+                  if (local.endsWith('/') || !path.extname(local)) local = path.join(local, 'index.html');
+                  else if (!local.endsWith('.html')) local += '.html';
 
-                  ensureDir(path.dirname(localPath));
-                  fs.writeFileSync(localPath, html, 'utf8');
-                  console.log(`  ✓ Saved HTML → ${localPath}`);
-
+                  ensureDir(path.dirname(local));
+                  fs.writeFileSync(local, html, 'utf8');
+                  console.log('  ✓ Saved ' + local);
                   await page.close();
-                  success = true;
+                  ok = true;
                   break;
-                } catch (err) {
-                  console.log(`  ✗ Attempt ${attempt}/${MAX_RETRIES}: ${err.message}`);
-                  if (attempt < MAX_RETRIES) {
-                    await new Promise(r => setTimeout(r, 2000 * attempt));
-                  }
+                } catch (e) {
+                  console.log('  ✗ Attempt ' + attempt + ': ' + e.message);
+                  if (attempt < MAX_RETRIES) await new Promise(r => setTimeout(r, 2000 * attempt));
                 }
               }
-
-              if (!success) {
-                console.log(`  !! Giving up on ${pageUrl}`);
-              }
+              if (!ok) console.log('  !! Failed permanently: ' + pageUrl);
             }
 
             await browser.close();
+            console.log('\nDownloaded: ' + downloaded.size + ' | Failed: ' + failed.length);
+            fs.writeFileSync('failed-assets-' + CHUNK + '.txt', failed.join('\n'));
+          })().catch(e => { console.error(e); process.exit(1); });
+          ENDOFSCRIPT
 
-            console.log('\n========== CHUNK SUMMARY ==========');
-            console.log(`Downloaded assets: ${downloadedAssets.size}`);
-            console.log(`Failed assets: ${failedAssets.length}`);
-            if (failedAssets.length) {
-              failedAssets.forEach(f => console.log('  - ' + f));
-            }
-            fs.writeFileSync(`failed-assets-${CHUNK}.txt`, failedAssets.join('\n'));
-          })().catch(err => {
-            console.error(err);
-            process.exit(1);
-          });
-          SCRIPT
+      - name: Run scraper
+        env:
+          OUTPUT: ${{ env.OUTPUT }}
+          CHUNK: ${{ matrix.chunk }}
+          MAX_RETRIES: ${{ env.MAX_RETRIES }}
+        run: node scrape.js
+
+      - name: Debug
+        run: |
+          echo "HTML: $(find backup -name '*.html' | wc -l)"
+          echo "CSS:  $(find backup -name '*.css' | wc -l)"
+          echo "JS:   $(find backup -name '*.js' | wc -l)"
+          find backup -name "*.css" | head -20 || true
+
+      - name: Upload chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-chunk-${{ matrix.chunk }}
+          path: |
+            backup/
+            failed-assets-*.txt
+          retention-days: 1
+          if-no-files-found: warn
+
+  merge:
+    needs: download
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare
+        run: |
+          rm -rf backup
+          mkdir -p backup
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backup-chunk-*
+          merge-multiple: true
+          path: .
+
+      - name: Merge
+        run: |
+          find . -type d -name "backup" | while read d; do
+            [ "$d" != "./backup" ] && cp -a "$d"/. backup/ 2>/dev/null || true
+          done
+          find backup -name "*.tmp" -delete 2>/dev/null || true
+
+      - name: Fix links
+        run: |
+          find backup -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) -print0 |
+          xargs -0 sed -i -e 's#https\?://payab\.ir/#/#g' -e 's#https\?://www\.payab\.ir/#/#g' || true
+
+      - name: Statistics
+        id: stats
+        run: |
+          HTML=$(find backup -name "*.html" | wc -l)
+          CSS=$(find backup -name "*.css" | wc -l)
+          echo "HTML=$HTML" >> $GITHUB_OUTPUT
+          echo "CSS=$CSS" >> $GITHUB_OUTPUT
+          echo "HTML: $HTML | CSS: $CSS | JS: $(find backup -name '*.js' | wc -l)"
+          find backup -iname "*frontend*.css" -o -iname "*widget-*.css" | head -15 || true
+
+      - name: Verify
+        run: |
+          FRONTEND=$(find backup -name "frontend*.css" | wc -l)
+          ELEM=$(find backup -path "*elementor*" -name "*.css" | wc -l)
+          echo "frontend*.css: $FRONTEND | elementor css: $ELEM"
+
+          if [ "${{ steps.stats.outputs.HTML }}" -lt 1 ]; then
+            echo "::error::No HTML files"
+            exit 1
+          fi
+          if [ "$FRONTEND" -eq 0 ] && [ "$ELEM" -lt 2 ]; then
+            echo "::error::Critical Elementor CSS missing"
+            exit 1
+          fi
+          echo "Verification passed"
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add backup
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Static backup $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+            echo "Committed and pushed"
+          fi
+
+      - name: Done
+        run: echo "STATIC BACKUP COMPLETED"
