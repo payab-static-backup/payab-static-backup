@@ -127,6 +127,7 @@ jobs:
           const https = require('https');
           const http = require('http');
           const { URL } = require('url');
+          const crypto = require('crypto');
 
           const OUTPUT = process.env.OUTPUT || 'backup';
           const CHUNK = process.env.CHUNK || '0';
@@ -154,7 +155,20 @@ jobs:
               const u = new URL(clean);
               let p = u.pathname;
               if (p.endsWith('/')) p += 'index.html';
-              return path.join(OUTPUT, p.replace(/^\//, ''));
+              
+              let localPath = path.join(OUTPUT, p.replace(/^\//, ''));
+              
+              // اگر مسیر خیلی طولانی است، آن را کوتاه کن
+              if (localPath.length > 200) {
+                const dir = path.dirname(localPath);
+                const ext = path.extname(localPath);
+                const name = path.basename(localPath, ext);
+                // از hash برای کوتاه کردن نام فایل استفاده کن
+                const hash = crypto.createHash('md5').update(localPath).digest('hex').substring(0, 16);
+                localPath = path.join(dir, hash + ext);
+              }
+              
+              return localPath;
             } catch {
               return null;
             }
