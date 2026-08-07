@@ -36,24 +36,24 @@ jobs:
           echo "${SITE}/" > all-urls.txt
 
           SITEMAPS=(
-  "post-sitemap.xml"
-  "page-sitemap.xml"
-  "ads-sitemap.xml"
-  "ads-sitemap2.xml"
-  "post_tag-sitemap.xml"
-  "ad_cat-sitemap.xml"
-  "building-news-sitemap.xml"
-  "moghararat-sitemap.xml"
-)
+            "post-sitemap.xml"
+            "page-sitemap.xml"
+            "ads-sitemap.xml"
+            "ads-sitemap2.xml"
+            "post_tag-sitemap.xml"
+            "ad_cat-sitemap.xml"
+            "building-news-sitemap.xml"
+            "moghararat-sitemap.xml"
+          )
 
-for SM in "${SITEMAPS[@]}"; do
-  echo "Fetching ${SM} ..."
-  curl -L -s --retry 3 --retry-delay 2 "${SITE}/${SM}" \
-    | xmlstarlet sel \
-        -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
-        -t -v "//x:loc" -n \
-    >> all-urls.txt || true
-done
+          for SM in "${SITEMAPS[@]}"; do
+            echo "Fetching ${SM} ..."
+            curl -L -s --retry 3 --retry-delay 2 "${SITE}/${SM}" \
+              | xmlstarlet sel \
+                  -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
+                  -t -v "//x:loc" -n \
+              >> all-urls.txt || true
+          done
 
           # فقط URLهای صفحات واقعی
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
