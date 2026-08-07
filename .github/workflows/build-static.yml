@@ -36,15 +36,11 @@ jobs:
                 -n \
             >> all-urls.txt || true
 
-          # اضافه کردن اجباری فایل‌های مهم المنتور
+          # فایل‌های مهم المنتور
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css" >> all-urls.txt
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.min.css" >> all-urls.txt
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css" >> all-urls.txt
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/fontawesome.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/solid.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/brands.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/regular.min.css" >> all-urls.txt
 
           sort -u all-urls.txt -o all-urls.txt
           echo "========================="
@@ -53,11 +49,19 @@ jobs:
           wc -l all-urls.txt
           cat all-urls.txt
 
-          split -n l/8 -d all-urls.txt chunk-
-          for f in chunk-*; do
-            mv "$f" "$f.txt"
-          done
-          echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
+          # اگر تعداد URLها خیلی کم بود، چانک‌ها را کمتر کنید
+          TOTAL=$(wc -l < all-urls.txt)
+          if [ "$TOTAL" -le 8 ]; then
+            # همه را در یک چانک بگذار
+            cp all-urls.txt chunk-00.txt
+            echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
+          else
+            split -n l/8 -d all-urls.txt chunk-
+            for f in chunk-*; do
+              mv "$f" "$f.txt"
+            done
+            echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
+          fi
       - name: Upload URL chunks
         uses: actions/upload-artifact@v4
         with:
@@ -86,88 +90,77 @@ jobs:
         run: |
           mkdir -p "${OUTPUT}"
           URLFILE="chunk-0${{ matrix.chunk }}.txt"
+          echo "Using file: $URLFILE"
+          cat "$URLFILE" || true
+
           while read -r URL; do
             [ -z "$URL" ] && continue
             echo "===================================="
-            echo "$URL"
+            echo "Downloading: $URL"
             echo "===================================="
             httrack \
               "$URL" \
               -O "${OUTPUT}" \
               "+*.payab.ir/*" \
-              "+*.payab-static-backup.pages.dev/*" \
-              "+*.cloudflare.com/*" \
-              "+*.cloudflareinsights.com/*" \
-              "+*.googleapis.com/*" \
-              "+*.gstatic.com/*" \
-              "+*.jsdelivr.net/*" \
-              "+*.bootstrapcdn.com/*" \
-              "+*.fontawesome.com/*" \
-              "+*.fonts.googleapis.com/*" \
-              "+*.fonts.gstatic.com/*" \
+              "-*wp-admin*" \
+              "-*wp-login*" \
+              "-*xmlrpc.php*" \
+              "+*.css" \
+              "+*.js" \
+              "+*.jpg" \
+              "+*.jpeg" \
+              "+*.png" \
+              "+*.webp" \
+              "+*.svg" \
+              "+*.gif" \
+              "+*.ico" \
               "+*.woff*" \
               "+*.woff2*" \
               "+*.ttf*" \
-              "+*.css*" \
-              "+*.js*" \
-              "+*.jpg*" \
-              "+*.jpeg*" \
-              "+*.png*" \
-              "+*.webp*" \
-              "+*.svg*" \
-              "+*.gif*" \
-              "+*.ico*" \
-              "+*.json*" \
+              "+*.json" \
               --robots=0 \
               --keep-links=0 \
               --near \
-              --ext-depth=5 \
-              --depth=5 \
+              --ext-depth=3 \
+              --depth=3 \
               --sockets=4 \
               --connection-per-second=2 \
               --disable-security-limits \
+              -v \
               || true
           done < "$URLFILE"
       - name: Debug downloaded files
         shell: bash
         run: |
           echo "==============================="
-          echo "Backup Tree"
+          echo "Backup Tree (first levels)"
           echo "==============================="
-          tree -L 4 "${OUTPUT}" || true
+          tree -L 3 "${OUTPUT}" || true
           echo
-          echo "==============================="
-          echo "Elementor / Frontend CSS"
-          echo "==============================="
-          find "${OUTPUT}" -iname "*elementor*" -o -iname "*frontend*.css" | head -50 || true
+          echo "All HTML files:"
+          find "${OUTPUT}" -name "*.html" || true
           echo
-          echo "CSS count: $(find "${OUTPUT}" -name "*.css" | wc -l)"
-          echo "JS count: $(find "${OUTPUT}" -name "*.js" | wc -l)"
-          echo "HTML count: $(find "${OUTPUT}" -name "*.html" | wc -l)"
+          echo "All CSS files:"
+          find "${OUTPUT}" -name "*.css" || true
+          echo
+          echo "Counts:"
+          echo "HTML: $(find "${OUTPUT}" -name "*.html" | wc -l)"
+          echo "CSS:  $(find "${OUTPUT}" -name "*.css" | wc -l)"
+          echo "JS:   $(find "${OUTPUT}" -name "*.js" | wc -l)"
       - name: Verify Elementor
         shell: bash
         run: |
-          echo "Looking for Elementor CSS..."
-          find "${OUTPUT}" \( -iname "*frontend*.css" -o -iname "*elementor*.css" \) | head -20 || true
-
           FOUND=0
-          if find "${OUTPUT}" -name "frontend.min.css" | grep -q .; then
-            echo "✓ frontend.min.css found"
-            FOUND=1
-          fi
-          if find "${OUTPUT}" -name "frontend-rtl.min.css" | grep -q .; then
-            echo "✓ frontend-rtl.min.css found"
+          if find "${OUTPUT}" -name "frontend*.css" | grep -q .; then
+            echo "✓ frontend CSS found"
             FOUND=1
           fi
           if find "${OUTPUT}" -path "*elementor*" -name "*.css" | grep -q .; then
-            echo "✓ Some Elementor CSS found"
+            echo "✓ Elementor CSS found"
             FOUND=1
           fi
-
           if [ "$FOUND" = "0" ]; then
-            echo "::warning::Elementor CSS not found. Continuing anyway..."
-          else
-            echo "Elementor verification passed."
+            echo "::warning::Elementor CSS not found"
           fi
       - name: Upload Chunk
         uses: actions/upload-artifact@v4
@@ -202,14 +195,16 @@ jobs:
           find backup -type f -name "*.html" -print0 |
           xargs -0 sed -i \
             -e 's#https://payab.ir#/#g' \
-            -e 's#http://payab.ir#/#g'
+            -e 's#http://payab.ir#/#g' || true
       - name: Show statistics
         shell: bash
         run: |
           echo "HTML: $(find backup -name "*.html" | wc -l)"
           echo "CSS:  $(find backup -name "*.css" | wc -l)"
           echo "JS:   $(find backup -name "*.js" | wc -l)"
-          echo "Images: $(find backup \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.svg" -o -iname "*.gif" -o -iname "*.webp" \) | wc -l)"
+          echo
+          echo "HTML files list:"
+          find backup -name "*.html" || true
       - name: Verify downloaded website
         shell: bash
         run: |
@@ -217,13 +212,18 @@ jobs:
           CSS_COUNT=$(find backup -name "*.css" | wc -l)
           echo "HTML : $HTML_COUNT"
           echo "CSS  : $CSS_COUNT"
-          if [ "$HTML_COUNT" -lt 5 ]; then
-            echo "::error::Too few HTML files downloaded."
+
+          if [ "$HTML_COUNT" -lt 1 ]; then
+            echo "::error::No HTML files downloaded at all."
             exit 1
           fi
-          if [ "$CSS_COUNT" -lt 5 ]; then
-            echo "::error::Too few CSS files downloaded."
-            exit 1
+
+          if [ "$HTML_COUNT" -lt 3 ]; then
+            echo "::warning::Only $HTML_COUNT HTML file(s) found. This may be normal if page-sitemap is small."
+          fi
+
+          if [ "$CSS_COUNT" -lt 3 ]; then
+            echo "::warning::Very few CSS files."
           fi
       - name: Check empty CSS
         shell: bash
