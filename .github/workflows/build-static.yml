@@ -1,258 +1,527 @@
-name: Build Static Backup
+name: Build Static Backup (Playwright)
+
 on:
   schedule:
     - cron: '0 22 * * 5'
   workflow_dispatch:
+
 permissions:
   contents: write
+
 env:
   SITE: https://payab.ir
   OUTPUT: backup
+  MAX_RETRIES: 3
+
 jobs:
+  #######################################################
+  # 1. آماده‌سازی لیست صفحات (فقط page-sitemap)
+  #######################################################
   prepare:
     runs-on: ubuntu-latest
     outputs:
       chunks: ${{ steps.split.outputs.chunks }}
+      total_urls: ${{ steps.split.outputs.total }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y httrack xmlstarlet tree
-      - name: Read sitemaps
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      - name: Collect URLs from page-sitemap
         id: split
         shell: bash
         run: |
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          echo "Reading page-sitemap.xml"
-          curl -L -s "${SITE}/page-sitemap.xml" \
+          echo "Fetching page-sitemap.xml ..."
+          curl -L -s --retry 3 --retry-delay 2 "${SITE}/page-sitemap.xml" \
             | xmlstarlet sel \
                 -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
-                -t \
-                -v "//x:loc" \
-                -n \
+                -t -v "//x:loc" -n \
             >> all-urls.txt || true
 
-          # فایل‌های حیاتی CSS المنتور و پلاگین‌ها
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-accordion-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-icon-list-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-image-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-divider-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-nav-menu-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-heading-rtl.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/swiper/v8/css/swiper.min.css" >> all-urls.txt
-          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/swiper/css/swiper.min.css" >> all-urls.txt
+          # فقط URLهای واقعی صفحات (حذف تصاویر و موارد غیرمرتبط)
+          grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
+            | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
+            | sort -u > clean-urls.txt
 
-          sort -u all-urls.txt -o all-urls.txt
-          echo "========================="
-          echo "Collected URLs"
-          echo "========================="
-          wc -l all-urls.txt
-          cat all-urls.txt
+          mv clean-urls.txt all-urls.txt
 
           TOTAL=$(wc -l < all-urls.txt)
-          if [ "$TOTAL" -le 10 ]; then
+          echo "Total clean URLs: $TOTAL"
+          cat all-urls.txt
+
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+          # تقسیم به حداکثر ۸ چانک
+          if [ "$TOTAL" -le 8 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
             split -n l/8 -d all-urls.txt chunk-
-            for f in chunk-*; do
-              mv "$f" "$f.txt"
-            done
+            for f in chunk-*; do mv "$f" "$f.txt"; done
             echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
           fi
+
       - name: Upload URL chunks
         uses: actions/upload-artifact@v4
         with:
           name: url-chunks
           path: chunk-*.txt
+          retention-days: 1
 
+  #######################################################
+  # 2. دانلود موازی با Playwright (مرورگر واقعی)
+  #######################################################
   download:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download chunk list
         uses: actions/download-artifact@v4
         with:
           name: url-chunks
-      - name: Install HTTrack
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y httrack tree
-      - name: Download website
-        shell: bash
-        run: |
-          mkdir -p "${OUTPUT}"
-          URLFILE="chunk-0${{ matrix.chunk }}.txt"
-          echo "Using: $URLFILE"
-          cat "$URLFILE" || true
 
-          while read -r URL; do
-            [ -z "$URL" ] && continue
-            echo "===================================="
-            echo "Downloading: $URL"
-            echo "===================================="
-            httrack \
-              "$URL" \
-              -O "${OUTPUT}" \
-              "+*.payab.ir/*" \
-              "+*.payab.ir/wp-content/plugins/*" \
-              "+*.payab.ir/wp-content/themes/*" \
-              "+*.payab.ir/wp-content/uploads/*" \
-              "-*wp-admin*" \
-              "-*wp-login*" \
-              "-*xmlrpc.php*" \
-              "+*.css" \
-              "+*.js" \
-              "+*.jpg" \
-              "+*.jpeg" \
-              "+*.png" \
-              "+*.webp" \
-              "+*.svg" \
-              "+*.gif" \
-              "+*.ico" \
-              "+*.woff" \
-              "+*.woff2" \
-              "+*.ttf" \
-              "+*.eot" \
-              "+*.json" \
-              --robots=0 \
-              --keep-links=0 \
-              --near \
-              --ext-depth=4 \
-              --depth=4 \
-              --sockets=6 \
-              --connection-per-second=3 \
-              --disable-security-limits \
-              -v \
-              || true
-          done < "$URLFILE"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Create scraper script
+        run: |
+          cat > scrape.js << 'SCRIPT'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const path = require('path');
+          const https = require('https');
+          const http = require('http');
+          const { URL } = require('url');
+
+          const OUTPUT = process.env.OUTPUT || 'backup';
+          const CHUNK = process.env.CHUNK || '0';
+          const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3');
+
+          const urlFile = `chunk-0${CHUNK}.txt`;
+          const urls = fs.readFileSync(urlFile, 'utf8')
+            .split('\n')
+            .map(u => u.trim())
+            .filter(u => u && u.startsWith('http'));
+
+          console.log(`Chunk ${CHUNK}: ${urls.length} URLs`);
+
+          const downloadedAssets = new Set();
+          const failedAssets = [];
+
+          function ensureDir(dir) {
+            fs.mkdirSync(dir, { recursive: true });
+          }
+
+          function urlToLocalPath(assetUrl) {
+            try {
+              const u = new URL(assetUrl);
+              let p = u.pathname;
+              if (p.endsWith('/')) p += 'index.html';
+              // حذف query string برای نام فایل
+              return path.join(OUTPUT, p.replace(/^\//, ''));
+            } catch {
+              return null;
+            }
+          }
+
+          async function downloadAsset(assetUrl, retries = MAX_RETRIES) {
+            if (downloadedAssets.has(assetUrl)) return;
+            downloadedAssets.add(assetUrl);
+
+            const localPath = urlToLocalPath(assetUrl);
+            if (!localPath) return;
+
+            // فقط فایل‌های دامنه payab.ir یا CDNهای مجاز
+            if (!assetUrl.includes('payab.ir') &&
+                !assetUrl.includes('googleapis.com') &&
+                !assetUrl.includes('gstatic.com') &&
+                !assetUrl.includes('cloudflare') &&
+                !assetUrl.includes('jsdelivr') &&
+                !assetUrl.includes('fontawesome') &&
+                !assetUrl.includes('bootstrapcdn')) {
+              return;
+            }
+
+            ensureDir(path.dirname(localPath));
+
+            for (let i = 0; i < retries; i++) {
+              try {
+                const protocol = assetUrl.startsWith('https') ? https : http;
+                await new Promise((resolve, reject) => {
+                  const req = protocol.get(assetUrl, { timeout: 20000 }, (res) => {
+                    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                      // follow redirect
+                      downloadAsset(res.headers.location, retries).then(resolve).catch(reject);
+                      return;
+                    }
+                    if (res.statusCode !== 200) {
+                      reject(new Error(`HTTP ${res.statusCode}`));
+                      return;
+                    }
+                    const file = fs.createWriteStream(localPath);
+                    res.pipe(file);
+                    file.on('finish', () => {
+                      file.close();
+                      resolve();
+                    });
+                  });
+                  req.on('error', reject);
+                  req.on('timeout', () => {
+                    req.destroy();
+                    reject(new Error('Timeout'));
+                  });
+                });
+                console.log(`  ✓ Asset: ${assetUrl}`);
+                return;
+              } catch (err) {
+                if (i === retries - 1) {
+                  console.log(`  ✗ Failed asset: ${assetUrl} → ${err.message}`);
+                  failedAssets.push(assetUrl);
+                } else {
+                  await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+                }
+              }
+            }
+          }
+
+          (async () => {
+            const browser = await chromium.launch({
+              headless: true,
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+
+            const context = await browser.newContext({
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              viewport: { width: 1920, height: 1080 },
+              locale: 'fa-IR'
+            });
+
+            // جمع‌آوری تمام requestهای شبکه
+            context.on('response', async (response) => {
+              const url = response.url();
+              const ct = response.headers()['content-type'] || '';
+              if (
+                ct.includes('css') ||
+                ct.includes('javascript') ||
+                ct.includes('font') ||
+                ct.includes('image') ||
+                url.match(/\.(css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico)(\?|$)/i)
+              ) {
+                try {
+                  if (response.ok()) {
+                    await downloadAsset(url);
+                  }
+                } catch {}
+              }
+            });
+
+            for (const pageUrl of urls) {
+              console.log(`\n========== Rendering: ${pageUrl} ==========`);
+              let success = false;
+
+              for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+                try {
+                  const page = await context.newPage();
+
+                  // صبر برای لود کامل (شامل المنتور)
+                  await page.goto(pageUrl, {
+                    waitUntil: 'networkidle',
+                    timeout: 60000
+                  });
+
+                  // صبر اضافی برای اجرای کامل JS و Elementor
+                  await page.waitForTimeout(4000);
+
+                  // اسکرول برای لود lazy assets
+                  await page.evaluate(async () => {
+                    await new Promise(resolve => {
+                      let total = 0;
+                      const dist = 400;
+                      const timer = setInterval(() => {
+                        window.scrollBy(0, dist);
+                        total += dist;
+                        if (total >= document.body.scrollHeight) {
+                          clearInterval(timer);
+                          window.scrollTo(0, 0);
+                          resolve();
+                        }
+                      }, 200);
+                    });
+                  });
+
+                  await page.waitForTimeout(2000);
+
+                  // گرفتن HTML نهایی رندر شده
+                  let html = await page.content();
+
+                  // تبدیل لینک‌های مطلق به نسبی
+                  html = html
+                    .replace(/https?:\/\/payab\.ir\//g, '/')
+                    .replace(/https?:\/\/www\.payab\.ir\//g, '/');
+
+                  // مسیر ذخیره HTML
+                  const u = new URL(pageUrl);
+                  let localPath = path.join(OUTPUT, u.pathname.replace(/^\//, ''));
+                  if (localPath.endsWith('/') || !path.extname(localPath)) {
+                    localPath = path.join(localPath, 'index.html');
+                  } else if (!localPath.endsWith('.html')) {
+                    localPath += '.html';
+                  }
+
+                  ensureDir(path.dirname(localPath));
+                  fs.writeFileSync(localPath, html, 'utf8');
+                  console.log(`  ✓ Saved HTML → ${localPath}`);
+
+                  await page.close();
+                  success = true;
+                  break;
+                } catch (err) {
+                  console.log(`  ✗ Attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
+                  if (attempt < MAX_RETRIES) {
+                    await new Promise(r => setTimeout(r, 2000 * attempt));
+                  }
+                }
+              }
+
+              if (!success) {
+                console.log(`  !! Giving up on ${pageUrl}`);
+              }
+            }
+
+            await browser.close();
+
+            // گزارش نهایی چانک
+            console.log('\n========== CHUNK SUMMARY ==========');
+            console.log(`Downloaded assets: ${downloadedAssets.size}`);
+            console.log(`Failed assets: ${failedAssets.length}`);
+            if (failedAssets.length > 0) {
+              console.log('Failed list:');
+              failedAssets.forEach(f => console.log('  - ' + f));
+            }
+
+            // ذخیره لیست فایل‌های ناموفق برای مرحله بعد
+            fs.writeFileSync(`failed-assets-${CHUNK}.txt`, failedAssets.join('\n'));
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          SCRIPT
+
+      - name: Run Playwright scraper
+        env:
+          OUTPUT: ${{ env.OUTPUT }}
+          CHUNK: ${{ matrix.chunk }}
+          MAX_RETRIES: ${{ env.MAX_RETRIES }}
+        run: node scrape.js
+
       - name: Debug downloaded files
         shell: bash
         run: |
           echo "==============================="
-          echo "Tree"
+          echo "Tree (depth 3)"
           echo "==============================="
-          tree -L 3 "${OUTPUT}" || true
+          find ${{ env.OUTPUT }} -maxdepth 3 -type d | head -50 || true
           echo
           echo "HTML files:"
-          find "${OUTPUT}" -name "*.html" || true
+          find ${{ env.OUTPUT }} -name "*.html" | head -30 || true
           echo
-          echo "CSS files (first 40):"
-          find "${OUTPUT}" -name "*.css" | head -40 || true
+          echo "CSS files (sample):"
+          find ${{ env.OUTPUT }} -name "*.css" | head -30 || true
           echo
-          echo "Counts → HTML: $(find "${OUTPUT}" -name "*.html" | wc -l) | CSS: $(find "${OUTPUT}" -name "*.css" | wc -l) | JS: $(find "${OUTPUT}" -name "*.js" | wc -l)"
-      - name: Verify assets
-        shell: bash
-        run: |
-          echo "Checking important CSS..."
-          find "${OUTPUT}" -name "frontend*.css" || true
-          find "${OUTPUT}" -name "widget-*.css" | head -10 || true
-          find "${OUTPUT}" -name "swiper*.css" || true
-      - name: Upload Chunk
+          echo "Counts:"
+          echo "  HTML : $(find ${{ env.OUTPUT }} -name '*.html' | wc -l)"
+          echo "  CSS  : $(find ${{ env.OUTPUT }} -name '*.css' | wc -l)"
+          echo "  JS   : $(find ${{ env.OUTPUT }} -name '*.js' | wc -l)"
+          echo "  Fonts: $(find ${{ env.OUTPUT }} \( -name '*.woff' -o -name '*.woff2' -o -name '*.ttf' \) | wc -l)"
+          echo "  Images: $(find ${{ env.OUTPUT }} \( -iname '*.jpg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.svg' -o -iname '*.gif' \) | wc -l)"
+
+      - name: Upload chunk artifact
         uses: actions/upload-artifact@v4
         with:
           name: backup-chunk-${{ matrix.chunk }}
-          path: backup/
+          path: |
+            backup/
+            failed-assets-*.txt
+          retention-days: 1
+          if-no-files-found: warn
 
+  #######################################################
+  # 3. ادغام + بررسی + Commit + Deploy
+  #######################################################
   merge:
     needs: download
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Prepare folders
         run: |
           rm -rf backup
-          mkdir backup
-      - name: Download Artifacts
+          mkdir -p backup
+
+      - name: Download all chunks
         uses: actions/download-artifact@v4
         with:
           pattern: backup-chunk-*
           merge-multiple: true
-          path: backup
-      - name: Remove HTTrack Cache
+          path: .
+
+      - name: Merge and clean
         shell: bash
         run: |
-          find backup -name "hts-cache*" -exec rm -rf {} + 2>/dev/null || true
+          # اگر artifactها داخل پوشه‌های جدا هستند، همه را به backup منتقل کن
+          find . -type d -name "backup" | while read d; do
+            if [ "$d" != "./backup" ]; then
+              cp -a "$d"/. backup/ 2>/dev/null || true
+            fi
+          done
+
+          # حذف فایل‌های موقت
           find backup -name "*.tmp" -delete 2>/dev/null || true
           find backup -name "*.lock" -delete 2>/dev/null || true
-      - name: Fix absolute links (stronger)
+
+          # حذف فایل‌های تکراری (بر اساس محتوا)
+          echo "Removing exact duplicate files..."
+          find backup -type f -print0 | xargs -0 md5sum | sort | uniq -w32 -d --all-repeated=separate | \
+            awk 'NF==1{c=$1} NF>1 && $1==c {print $2}' | xargs -r rm -f || true
+
+      - name: Fix links (HTML + CSS + JS)
         shell: bash
         run: |
-          # اصلاح لینک‌ها در HTML و CSS و JS
           find backup -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) -print0 |
           xargs -0 sed -i \
             -e 's#https\?://payab\.ir/#/#g' \
             -e 's#https\?://www\.payab\.ir/#/#g' \
             -e 's#//payab\.ir/#/#g' || true
-      - name: Show statistics
+
+      - name: Full statistics
+        id: stats
         shell: bash
         run: |
-          echo "HTML: $(find backup -name "*.html" | wc -l)"
-          echo "CSS:  $(find backup -name "*.css" | wc -l)"
-          echo "JS:   $(find backup -name "*.js" | wc -l)"
+          HTML=$(find backup -name "*.html" | wc -l)
+          CSS=$(find backup -name "*.css" | wc -l)
+          JS=$(find backup -name "*.js" | wc -l)
+          FONTS=$(find backup \( -name "*.woff" -o -name "*.woff2" -o -name "*.ttf" -o -name "*.eot" \) | wc -l)
+          IMAGES=$(find backup \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.gif" -o -iname "*.svg" -o -iname "*.webp" -o -iname "*.ico" \) | wc -l)
+
+          echo "HTML=$HTML" >> $GITHUB_OUTPUT
+          echo "CSS=$CSS" >> $GITHUB_OUTPUT
+          echo "JS=$JS" >> $GITHUB_OUTPUT
+
+          echo "==============================="
+          echo "FINAL STATISTICS"
+          echo "==============================="
+          echo "HTML   : $HTML"
+          echo "CSS    : $CSS"
+          echo "JS     : $JS"
+          echo "Fonts  : $FONTS"
+          echo "Images : $IMAGES"
+          echo "Dirs   : $(find backup -type d | wc -l)"
+          echo "Files  : $(find backup -type f | wc -l)"
           echo
-          echo "Sample CSS files:"
-          find backup -name "*.css" | head -30 || true
-      - name: Verify downloaded website
+          echo "Sample Elementor CSS:"
+          find backup -iname "*frontend*.css" -o -iname "*widget-*.css" | head -20 || true
+
+      - name: Verify critical Elementor assets
         shell: bash
         run: |
-          HTML_COUNT=$(find backup -name "*.html" | wc -l)
-          CSS_COUNT=$(find backup -name "*.css" | wc -l)
-          echo "HTML : $HTML_COUNT"
-          echo "CSS  : $CSS_COUNT"
-          if [ "$HTML_COUNT" -lt 1 ]; then
-            echo "::error::No HTML files."
+          echo "==============================="
+          echo "ELEMENTOR VERIFICATION"
+          echo "==============================="
+
+          CRITICAL_OK=1
+
+          # حداقل باید چند فایل CSS المنتور وجود داشته باشد
+          ELEM_CSS=$(find backup -path "*elementor*" -name "*.css" | wc -l)
+          FRONTEND=$(find backup -name "frontend*.css" | wc -l)
+
+          echo "Elementor CSS files : $ELEM_CSS"
+          echo "frontend*.css files : $FRONTEND"
+
+          if [ "$FRONTEND" -eq 0 ] && [ "$ELEM_CSS" -lt 3 ]; then
+            echo "::error::Critical Elementor CSS files are missing!"
+            CRITICAL_OK=0
+          fi
+
+          if [ "${{ steps.stats.outputs.HTML }}" -lt 1 ]; then
+            echo "::error::No HTML files found!"
+            CRITICAL_OK=0
+          fi
+
+          if [ "${{ steps.stats.outputs.CSS }}" -lt 5 ]; then
+            echo "::error::Too few CSS files (${{ steps.stats.outputs.CSS }})"
+            CRITICAL_OK=0
+          fi
+
+          # گزارش فایل‌های ناموفق (اگر وجود داشته باشد)
+          if ls failed-assets-*.txt 1>/dev/null 2>&1; then
+            echo
+            echo "Failed assets across chunks:"
+            cat failed-assets-*.txt | sort -u | head -50 || true
+          fi
+
+          if [ "$CRITICAL_OK" -eq 0 ]; then
+            echo "::error::Build stopped because critical assets are missing."
             exit 1
           fi
-          if [ "$CSS_COUNT" -lt 5 ]; then
-            echo "::warning::Very few CSS files ($CSS_COUNT)."
-          fi
-      - name: Check empty CSS
-        shell: bash
-        run: |
-          EMPTY=$(find backup -name "*.css" -size 0)
-          if [ -n "$EMPTY" ]; then
-            echo "$EMPTY"
-            echo "::warning::Empty CSS files found."
-          else
-            echo "No empty CSS files."
-          fi
-      - name: Final report
-        shell: bash
-        run: |
-          echo "==============================="
-          echo "FINAL REPORT"
-          echo "==============================="
-          echo "Directories: $(find backup -type d | wc -l)"
-          echo "Files:       $(find backup -type f | wc -l)"
-          echo "HTML:        $(find backup -name "*.html" | wc -l)"
-          echo "CSS:         $(find backup -name "*.css" | wc -l)"
-          echo "JS:          $(find backup -name "*.js" | wc -l)"
-      - name: Commit backup
+
+          echo "✓ Elementor and critical assets verification passed."
+
+      - name: Commit only if changed
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # حذف backup قبلی و جایگزینی با نسخه جدید
+          git rm -rf backup 2>/dev/null || true
+          mkdir -p backup
+          # فایل‌ها از مرحله قبل اینجا هستند
+
           git add backup
+
           if git diff --cached --quiet; then
-            echo "No changes."
-            exit 0
+            echo "No changes to commit."
+          else
+            git commit -m "Static backup (Playwright) $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+            echo "✓ Changes committed and pushed."
           fi
-          git commit -m "Static backup $(date -u '+%Y-%m-%d %H:%M UTC')"
-      - name: Push repository
-        run: git push
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: payab-static-backup          # نام پروژه Cloudflare Pages خودتان
+          directory: backup
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+        # اگر هنوز secrets را تنظیم نکرده‌اید، این مرحله را موقتاً comment کنید
+
       - name: Finished
-        run: echo "STATIC BACKUP COMPLETED"
+        run: |
+          echo "==============================="
+          echo "STATIC BACKUP + DEPLOY COMPLETED"
+          echo "==============================="
