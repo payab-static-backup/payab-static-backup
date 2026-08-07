@@ -19,10 +19,7 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            httrack \
-            xmlstarlet \
-            tree
+          sudo apt-get install -y httrack xmlstarlet tree
       - name: Read sitemaps
         id: split
         shell: bash
@@ -30,7 +27,6 @@ jobs:
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          # فقط page-sitemap
           echo "Reading page-sitemap.xml"
           curl -L -s "${SITE}/page-sitemap.xml" \
             | xmlstarlet sel \
@@ -40,20 +36,15 @@ jobs:
                 -n \
             >> all-urls.txt || true
 
-          # اضافه کردن اجباری فایل‌های مهم المنتور و assets
-          cat >> all-urls.txt << 'EOF'
-https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css
-https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.css
-https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/fontawesome.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/solid.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/brands.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/regular.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/css/widget-icon-box.min.css
-https://payab.ir/wp-content/plugins/elementor/assets/css/widget-icon-list.min.css
-https://payab.ir/wp-content/uploads/elementor/css/
-EOF
+          # اضافه کردن اجباری فایل‌های مهم المنتور
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/fontawesome.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/solid.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/brands.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/font-awesome/css/regular.min.css" >> all-urls.txt
 
           sort -u all-urls.txt -o all-urls.txt
           echo "========================="
@@ -61,8 +52,9 @@ EOF
           echo "========================="
           wc -l all-urls.txt
           cat all-urls.txt
+
           split -n l/8 -d all-urls.txt chunk-
-          for f in chunk-* ; do
+          for f in chunk-*; do
             mv "$f" "$f.txt"
           done
           echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
@@ -71,7 +63,7 @@ EOF
         with:
           name: url-chunks
           path: chunk-*.txt
-#############################################################
+
   download:
     needs: prepare
     runs-on: ubuntu-latest
@@ -94,8 +86,7 @@ EOF
         run: |
           mkdir -p "${OUTPUT}"
           URLFILE="chunk-0${{ matrix.chunk }}.txt"
-          while read URL
-          do
+          while read -r URL; do
             [ -z "$URL" ] && continue
             echo "===================================="
             echo "$URL"
@@ -146,68 +137,35 @@ EOF
           tree -L 4 "${OUTPUT}" || true
           echo
           echo "==============================="
-          echo "Elementor CSS"
+          echo "Elementor / Frontend CSS"
           echo "==============================="
-          find "${OUTPUT}" -iname "*elementor*" | head -100 || true
+          find "${OUTPUT}" -iname "*elementor*" -o -iname "*frontend*.css" | head -50 || true
           echo
-          echo "==============================="
-          echo "Plugin CSS"
-          echo "==============================="
-          find "${OUTPUT}" -path "*wp-content/plugins*" -name "*.css" | sort | head -100 || true
-          echo
-          echo "==============================="
-          echo "Frontend CSS"
-          echo "==============================="
-          find "${OUTPUT}" -name "frontend*.css" || true
-          echo
-          echo "==============================="
-          echo "JS Files"
-          echo "==============================="
-          find "${OUTPUT}" -name "*.js" | wc -l
-          echo
-          echo "==============================="
-          echo "CSS Files"
-          echo "==============================="
-          find "${OUTPUT}" -name "*.css" | wc -l
-          echo
-          echo "==============================="
-          echo "Image Files"
-          echo "==============================="
-          find "${OUTPUT}" \( \
-              -iname "*.jpg" -o \
-              -iname "*.jpeg" -o \
-              -iname "*.png" -o \
-              -iname "*.gif" -o \
-              -iname "*.svg" -o \
-              -iname "*.webp" \
-          \) | wc -l
+          echo "CSS count: $(find "${OUTPUT}" -name "*.css" | wc -l)"
+          echo "JS count: $(find "${OUTPUT}" -name "*.js" | wc -l)"
+          echo "HTML count: $(find "${OUTPUT}" -name "*.html" | wc -l)"
       - name: Verify Elementor
         shell: bash
         run: |
-          echo "Looking for Elementor CSS files..."
-          find "${OUTPUT}" -iname "*frontend*.css" -o -iname "*elementor*.css" | head -20 || true
+          echo "Looking for Elementor CSS..."
+          find "${OUTPUT}" \( -iname "*frontend*.css" -o -iname "*elementor*.css" \) | head -20 || true
 
           FOUND=0
-          if find "${OUTPUT}" -name "frontend.min.css" | grep -q .
-          then
+          if find "${OUTPUT}" -name "frontend.min.css" | grep -q .; then
             echo "✓ frontend.min.css found"
             FOUND=1
           fi
-          if find "${OUTPUT}" -name "frontend-rtl.min.css" | grep -q .
-          then
+          if find "${OUTPUT}" -name "frontend-rtl.min.css" | grep -q .; then
             echo "✓ frontend-rtl.min.css found"
             FOUND=1
           fi
-          if find "${OUTPUT}" -path "*elementor*" -name "*.css" | grep -q .
-          then
-            echo "✓ Some Elementor CSS files found"
+          if find "${OUTPUT}" -path "*elementor*" -name "*.css" | grep -q .; then
+            echo "✓ Some Elementor CSS found"
             FOUND=1
           fi
 
-          if [ "$FOUND" = "0" ]
-          then
-            echo "::warning::Elementor CSS files were not found. Continuing anyway..."
-            # دیگر exit 1 نمی‌کنیم تا کل جاب fail نشود
+          if [ "$FOUND" = "0" ]; then
+            echo "::warning::Elementor CSS not found. Continuing anyway..."
           else
             echo "Elementor verification passed."
           fi
@@ -216,7 +174,7 @@ EOF
         with:
           name: backup-chunk-${{ matrix.chunk }}
           path: backup/
-##############################################################
+
   merge:
     needs: download
     runs-on: ubuntu-latest
@@ -235,9 +193,9 @@ EOF
       - name: Remove HTTrack Cache
         shell: bash
         run: |
-          find backup -name "hts-cache*" -exec rm -rf {} +
-          find backup -name "*.tmp" -delete
-          find backup -name "*.lock" -delete
+          find backup -name "hts-cache*" -exec rm -rf {} + 2>/dev/null || true
+          find backup -name "*.tmp" -delete 2>/dev/null || true
+          find backup -name "*.lock" -delete 2>/dev/null || true
       - name: Fix absolute links
         shell: bash
         run: |
@@ -248,36 +206,17 @@ EOF
       - name: Show statistics
         shell: bash
         run: |
-          echo "HTML"
-          find backup -name "*.html" | wc -l
-          echo
-          echo "CSS"
-          find backup -name "*.css" | wc -l
-          echo
-          echo "JS"
-          find backup -name "*.js" | wc -l
-          echo
-          echo "Images"
-          find backup \( \
-            -iname "*.jpg" -o \
-            -iname "*.jpeg" -o \
-            -iname "*.png" -o \
-            -iname "*.svg" -o \
-            -iname "*.gif" -o \
-            -iname "*.webp" \
-          \) | wc -l
+          echo "HTML: $(find backup -name "*.html" | wc -l)"
+          echo "CSS:  $(find backup -name "*.css" | wc -l)"
+          echo "JS:   $(find backup -name "*.js" | wc -l)"
+          echo "Images: $(find backup \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.svg" -o -iname "*.gif" -o -iname "*.webp" \) | wc -l)"
       - name: Verify downloaded website
         shell: bash
         run: |
-          echo "==============================="
-          echo "VERIFY WEBSITE"
-          echo "==============================="
           HTML_COUNT=$(find backup -name "*.html" | wc -l)
           CSS_COUNT=$(find backup -name "*.css" | wc -l)
-          JS_COUNT=$(find backup -name "*.js" | wc -l)
           echo "HTML : $HTML_COUNT"
-          echo "CSS : $CSS_COUNT"
-          echo "JS : $JS_COUNT"
+          echo "CSS  : $CSS_COUNT"
           if [ "$HTML_COUNT" -lt 5 ]; then
             echo "::error::Too few HTML files downloaded."
             exit 1
@@ -289,9 +228,6 @@ EOF
       - name: Check empty CSS
         shell: bash
         run: |
-          echo "==============================="
-          echo "EMPTY CSS FILES"
-          echo "==============================="
           EMPTY=$(find backup -name "*.css" -size 0)
           if [ -n "$EMPTY" ]; then
             echo "$EMPTY"
@@ -299,55 +235,34 @@ EOF
           else
             echo "No empty CSS files."
           fi
-      - name: Check broken HTML
+      - name: Check broken links
         shell: bash
         run: |
-          echo "==============================="
-          echo "BROKEN LINKS"
-          echo "==============================="
-          grep -R "https://payab.ir" backup \
-            --include="*.html" \
-            || true
+          grep -R "https://payab.ir" backup --include="*.html" || true
       - name: Show final statistics
         shell: bash
         run: |
           echo "==============================="
           echo "FINAL REPORT"
           echo "==============================="
-          echo "Directories:"
-          find backup -type d | wc -l
-          echo "Files:"
-          find backup -type f | wc -l
-          echo "HTML:"
-          find backup -name "*.html" | wc -l
-          echo "CSS:"
-          find backup -name "*.css" | wc -l
-          echo "JS:"
-          find backup -name "*.js" | wc -l
-          echo "Images:"
-          find backup \( \
-            -iname "*.jpg" -o \
-            -iname "*.jpeg" -o \
-            -iname "*.png" -o \
-            -iname "*.gif" -o \
-            -iname "*.svg" -o \
-            -iname "*.webp" \
-          \) | wc -l
+          echo "Directories: $(find backup -type d | wc -l)"
+          echo "Files:       $(find backup -type f | wc -l)"
+          echo "HTML:        $(find backup -name "*.html" | wc -l)"
+          echo "CSS:         $(find backup -name "*.css" | wc -l)"
+          echo "JS:          $(find backup -name "*.js" | wc -l)"
       - name: Commit backup
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add backup
-          if git diff --cached --quiet
-          then
+          if git diff --cached --quiet; then
             echo "No changes."
             exit 0
           fi
           git commit -m "Static backup $(date -u '+%Y-%m-%d %H:%M UTC')"
       - name: Push repository
-        run: |
-          git push
+        run: git push
       - name: Finished
         run: |
           echo "==============================="
