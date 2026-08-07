@@ -43,7 +43,7 @@ jobs:
                 -t -v "//x:loc" -n \
             >> all-urls.txt || true
 
-          # فقط URLهای واقعی صفحات (حذف تصاویر و موارد غیرمرتبط)
+          # فقط URLهای واقعی صفحات
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
             | sort -u > clean-urls.txt
@@ -56,7 +56,6 @@ jobs:
 
           echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
 
-          # تقسیم به حداکثر ۸ چانک
           if [ "$TOTAL" -le 8 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
@@ -74,7 +73,7 @@ jobs:
           retention-days: 1
 
   #######################################################
-  # 2. دانلود موازی با Playwright (مرورگر واقعی)
+  # 2. دانلود موازی با Playwright
   #######################################################
   download:
     needs: prepare
@@ -138,7 +137,6 @@ jobs:
               const u = new URL(assetUrl);
               let p = u.pathname;
               if (p.endsWith('/')) p += 'index.html';
-              // حذف query string برای نام فایل
               return path.join(OUTPUT, p.replace(/^\//, ''));
             } catch {
               return null;
@@ -152,7 +150,6 @@ jobs:
             const localPath = urlToLocalPath(assetUrl);
             if (!localPath) return;
 
-            // فقط فایل‌های دامنه payab.ir یا CDNهای مجاز
             if (!assetUrl.includes('payab.ir') &&
                 !assetUrl.includes('googleapis.com') &&
                 !assetUrl.includes('gstatic.com') &&
@@ -171,7 +168,6 @@ jobs:
                 await new Promise((resolve, reject) => {
                   const req = protocol.get(assetUrl, { timeout: 20000 }, (res) => {
                     if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                      // follow redirect
                       downloadAsset(res.headers.location, retries).then(resolve).catch(reject);
                       return;
                     }
@@ -217,7 +213,6 @@ jobs:
               locale: 'fa-IR'
             });
 
-            // جمع‌آوری تمام requestهای شبکه
             context.on('response', async (response) => {
               const url = response.url();
               const ct = response.headers()['content-type'] || '';
@@ -244,16 +239,13 @@ jobs:
                 try {
                   const page = await context.newPage();
 
-                  // صبر برای لود کامل (شامل المنتور)
                   await page.goto(pageUrl, {
                     waitUntil: 'networkidle',
                     timeout: 60000
                   });
 
-                  // صبر اضافی برای اجرای کامل JS و Elementor
                   await page.waitForTimeout(4000);
 
-                  // اسکرول برای لود lazy assets
                   await page.evaluate(async () => {
                     await new Promise(resolve => {
                       let total = 0;
@@ -272,15 +264,12 @@ jobs:
 
                   await page.waitForTimeout(2000);
 
-                  // گرفتن HTML نهایی رندر شده
                   let html = await page.content();
 
-                  // تبدیل لینک‌های مطلق به نسبی
                   html = html
                     .replace(/https?:\/\/payab\.ir\//g, '/')
                     .replace(/https?:\/\/www\.payab\.ir\//g, '/');
 
-                  // مسیر ذخیره HTML
                   const u = new URL(pageUrl);
                   let localPath = path.join(OUTPUT, u.pathname.replace(/^\//, ''));
                   if (localPath.endsWith('/') || !path.extname(localPath)) {
@@ -311,7 +300,6 @@ jobs:
 
             await browser.close();
 
-            // گزارش نهایی چانک
             console.log('\n========== CHUNK SUMMARY ==========');
             console.log(`Downloaded assets: ${downloadedAssets.size}`);
             console.log(`Failed assets: ${failedAssets.length}`);
@@ -320,7 +308,6 @@ jobs:
               failedAssets.forEach(f => console.log('  - ' + f));
             }
 
-            // ذخیره لیست فایل‌های ناموفق برای مرحله بعد
             fs.writeFileSync(`failed-assets-${CHUNK}.txt`, failedAssets.join('\n'));
           })().catch(err => {
             console.error(err);
@@ -367,7 +354,7 @@ jobs:
           if-no-files-found: warn
 
   #######################################################
-  # 3. ادغام + بررسی + Commit + Deploy
+  # 3. ادغام + بررسی + Commit (بدون Deploy)
   #######################################################
   merge:
     needs: download
@@ -391,20 +378,17 @@ jobs:
       - name: Merge and clean
         shell: bash
         run: |
-          # اگر artifactها داخل پوشه‌های جدا هستند، همه را به backup منتقل کن
           find . -type d -name "backup" | while read d; do
             if [ "$d" != "./backup" ]; then
               cp -a "$d"/. backup/ 2>/dev/null || true
             fi
           done
 
-          # حذف فایل‌های موقت
           find backup -name "*.tmp" -delete 2>/dev/null || true
           find backup -name "*.lock" -delete 2>/dev/null || true
 
-          # حذف فایل‌های تکراری (بر اساس محتوا)
           echo "Removing exact duplicate files..."
-          find backup -type f -print0 | xargs -0 md5sum | sort | uniq -w32 -d --all-repeated=separate | \
+          find backup -type f -print0 | xargs -0 md5sum 2>/dev/null | sort | uniq -w32 -d --all-repeated=separate | \
             awk 'NF==1{c=$1} NF>1 && $1==c {print $2}' | xargs -r rm -f || true
 
       - name: Fix links (HTML + CSS + JS)
@@ -453,7 +437,6 @@ jobs:
 
           CRITICAL_OK=1
 
-          # حداقل باید چند فایل CSS المنتور وجود داشته باشد
           ELEM_CSS=$(find backup -path "*elementor*" -name "*.css" | wc -l)
           FRONTEND=$(find backup -name "frontend*.css" | wc -l)
 
@@ -475,7 +458,6 @@ jobs:
             CRITICAL_OK=0
           fi
 
-          # گزارش فایل‌های ناموفق (اگر وجود داشته باشد)
           if ls failed-assets-*.txt 1>/dev/null 2>&1; then
             echo
             echo "Failed assets across chunks:"
@@ -495,11 +477,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # حذف backup قبلی و جایگزینی با نسخه جدید
-          git rm -rf backup 2>/dev/null || true
-          mkdir -p backup
-          # فایل‌ها از مرحله قبل اینجا هستند
-
           git add backup
 
           if git diff --cached --quiet; then
@@ -510,18 +487,8 @@ jobs:
             echo "✓ Changes committed and pushed."
           fi
 
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: payab-static-backup          # نام پروژه Cloudflare Pages خودتان
-          directory: backup
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-        # اگر هنوز secrets را تنظیم نکرده‌اید، این مرحله را موقتاً comment کنید
-
       - name: Finished
         run: |
           echo "==============================="
-          echo "STATIC BACKUP + DEPLOY COMPLETED"
+          echo "STATIC BACKUP COMPLETED (No Deploy)"
           echo "==============================="
