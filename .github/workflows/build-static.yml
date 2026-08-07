@@ -36,11 +36,19 @@ jobs:
                 -n \
             >> all-urls.txt || true
 
-          # فایل‌های مهم المنتور
+          # فایل‌های حیاتی CSS المنتور و پلاگین‌ها
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css" >> all-urls.txt
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.min.css" >> all-urls.txt
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css" >> all-urls.txt
           echo "https://payab.ir/wp-content/plugins/elementor/assets/css/frontend-rtl.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-accordion-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-icon-list-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-image-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-divider-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-nav-menu-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/css/widget-heading-rtl.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/swiper/v8/css/swiper.min.css" >> all-urls.txt
+          echo "https://payab.ir/wp-content/plugins/elementor/assets/lib/swiper/css/swiper.min.css" >> all-urls.txt
 
           sort -u all-urls.txt -o all-urls.txt
           echo "========================="
@@ -49,10 +57,8 @@ jobs:
           wc -l all-urls.txt
           cat all-urls.txt
 
-          # اگر تعداد URLها خیلی کم بود، چانک‌ها را کمتر کنید
           TOTAL=$(wc -l < all-urls.txt)
-          if [ "$TOTAL" -le 8 ]; then
-            # همه را در یک چانک بگذار
+          if [ "$TOTAL" -le 10 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
@@ -90,7 +96,7 @@ jobs:
         run: |
           mkdir -p "${OUTPUT}"
           URLFILE="chunk-0${{ matrix.chunk }}.txt"
-          echo "Using file: $URLFILE"
+          echo "Using: $URLFILE"
           cat "$URLFILE" || true
 
           while read -r URL; do
@@ -102,6 +108,9 @@ jobs:
               "$URL" \
               -O "${OUTPUT}" \
               "+*.payab.ir/*" \
+              "+*.payab.ir/wp-content/plugins/*" \
+              "+*.payab.ir/wp-content/themes/*" \
+              "+*.payab.ir/wp-content/uploads/*" \
               "-*wp-admin*" \
               "-*wp-login*" \
               "-*xmlrpc.php*" \
@@ -114,17 +123,18 @@ jobs:
               "+*.svg" \
               "+*.gif" \
               "+*.ico" \
-              "+*.woff*" \
-              "+*.woff2*" \
-              "+*.ttf*" \
+              "+*.woff" \
+              "+*.woff2" \
+              "+*.ttf" \
+              "+*.eot" \
               "+*.json" \
               --robots=0 \
               --keep-links=0 \
               --near \
-              --ext-depth=3 \
-              --depth=3 \
-              --sockets=4 \
-              --connection-per-second=2 \
+              --ext-depth=4 \
+              --depth=4 \
+              --sockets=6 \
+              --connection-per-second=3 \
               --disable-security-limits \
               -v \
               || true
@@ -133,35 +143,24 @@ jobs:
         shell: bash
         run: |
           echo "==============================="
-          echo "Backup Tree (first levels)"
+          echo "Tree"
           echo "==============================="
           tree -L 3 "${OUTPUT}" || true
           echo
-          echo "All HTML files:"
+          echo "HTML files:"
           find "${OUTPUT}" -name "*.html" || true
           echo
-          echo "All CSS files:"
-          find "${OUTPUT}" -name "*.css" || true
+          echo "CSS files (first 40):"
+          find "${OUTPUT}" -name "*.css" | head -40 || true
           echo
-          echo "Counts:"
-          echo "HTML: $(find "${OUTPUT}" -name "*.html" | wc -l)"
-          echo "CSS:  $(find "${OUTPUT}" -name "*.css" | wc -l)"
-          echo "JS:   $(find "${OUTPUT}" -name "*.js" | wc -l)"
-      - name: Verify Elementor
+          echo "Counts → HTML: $(find "${OUTPUT}" -name "*.html" | wc -l) | CSS: $(find "${OUTPUT}" -name "*.css" | wc -l) | JS: $(find "${OUTPUT}" -name "*.js" | wc -l)"
+      - name: Verify assets
         shell: bash
         run: |
-          FOUND=0
-          if find "${OUTPUT}" -name "frontend*.css" | grep -q .; then
-            echo "✓ frontend CSS found"
-            FOUND=1
-          fi
-          if find "${OUTPUT}" -path "*elementor*" -name "*.css" | grep -q .; then
-            echo "✓ Elementor CSS found"
-            FOUND=1
-          fi
-          if [ "$FOUND" = "0" ]; then
-            echo "::warning::Elementor CSS not found"
-          fi
+          echo "Checking important CSS..."
+          find "${OUTPUT}" -name "frontend*.css" || true
+          find "${OUTPUT}" -name "widget-*.css" | head -10 || true
+          find "${OUTPUT}" -name "swiper*.css" || true
       - name: Upload Chunk
         uses: actions/upload-artifact@v4
         with:
@@ -189,13 +188,15 @@ jobs:
           find backup -name "hts-cache*" -exec rm -rf {} + 2>/dev/null || true
           find backup -name "*.tmp" -delete 2>/dev/null || true
           find backup -name "*.lock" -delete 2>/dev/null || true
-      - name: Fix absolute links
+      - name: Fix absolute links (stronger)
         shell: bash
         run: |
-          find backup -type f -name "*.html" -print0 |
+          # اصلاح لینک‌ها در HTML و CSS و JS
+          find backup -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) -print0 |
           xargs -0 sed -i \
-            -e 's#https://payab.ir#/#g' \
-            -e 's#http://payab.ir#/#g' || true
+            -e 's#https\?://payab\.ir/#/#g' \
+            -e 's#https\?://www\.payab\.ir/#/#g' \
+            -e 's#//payab\.ir/#/#g' || true
       - name: Show statistics
         shell: bash
         run: |
@@ -203,8 +204,8 @@ jobs:
           echo "CSS:  $(find backup -name "*.css" | wc -l)"
           echo "JS:   $(find backup -name "*.js" | wc -l)"
           echo
-          echo "HTML files list:"
-          find backup -name "*.html" || true
+          echo "Sample CSS files:"
+          find backup -name "*.css" | head -30 || true
       - name: Verify downloaded website
         shell: bash
         run: |
@@ -212,18 +213,12 @@ jobs:
           CSS_COUNT=$(find backup -name "*.css" | wc -l)
           echo "HTML : $HTML_COUNT"
           echo "CSS  : $CSS_COUNT"
-
           if [ "$HTML_COUNT" -lt 1 ]; then
-            echo "::error::No HTML files downloaded at all."
+            echo "::error::No HTML files."
             exit 1
           fi
-
-          if [ "$HTML_COUNT" -lt 3 ]; then
-            echo "::warning::Only $HTML_COUNT HTML file(s) found. This may be normal if page-sitemap is small."
-          fi
-
-          if [ "$CSS_COUNT" -lt 3 ]; then
-            echo "::warning::Very few CSS files."
+          if [ "$CSS_COUNT" -lt 5 ]; then
+            echo "::warning::Very few CSS files ($CSS_COUNT)."
           fi
       - name: Check empty CSS
         shell: bash
@@ -235,11 +230,7 @@ jobs:
           else
             echo "No empty CSS files."
           fi
-      - name: Check broken links
-        shell: bash
-        run: |
-          grep -R "https://payab.ir" backup --include="*.html" || true
-      - name: Show final statistics
+      - name: Final report
         shell: bash
         run: |
           echo "==============================="
@@ -264,7 +255,4 @@ jobs:
       - name: Push repository
         run: git push
       - name: Finished
-        run: |
-          echo "==============================="
-          echo "STATIC BACKUP COMPLETED"
-          echo "==============================="
+        run: echo "STATIC BACKUP COMPLETED"
