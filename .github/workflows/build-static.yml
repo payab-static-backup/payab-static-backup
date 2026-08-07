@@ -123,6 +123,7 @@ jobs:
           const https = require('https');
           const http = require('http');
           const { URL } = require('url');
+          const crypto = require('crypto');
 
           const OUTPUT = process.env.OUTPUT || 'backup';
           const CHUNK = process.env.CHUNK || '0';
@@ -149,7 +150,12 @@ jobs:
               const u = new URL(clean);
               let p = u.pathname;
               if (p.endsWith('/')) p += 'index.html';
-              return path.join(OUTPUT, p.replace(/^\//, ''));
+              let rel=p.replace(/^\//,'');
+               if(rel.length>180){
+                 const ext=path.extname(rel);
+                 rel='longpaths/'+crypto.createHash('sha1').update(rel).digest('hex')+ext;
+               }
+               return path.join(OUTPUT, rel);
             } catch {
               return null;
             }
