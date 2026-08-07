@@ -1,61 +1,38 @@
-name: Build Static Backup (Test)
-
+name: Build Static Backup
 on:
   schedule:
     - cron: '0 22 * * 5'
   workflow_dispatch:
-
 permissions:
   contents: write
-
 env:
   SITE: https://payab.ir
   OUTPUT: backup
-
 jobs:
-
   prepare:
     runs-on: ubuntu-latest
-
     outputs:
       chunks: ${{ steps.split.outputs.chunks }}
-
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Install packages
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             httrack \
             xmlstarlet \
             tree
-
       - name: Read sitemaps
         id: split
-
         shell: bash
-
         run: |
-
           rm -f all-urls.txt
-
+          # فقط صفحهٔ اصلی + page-sitemap.xml
           echo "${SITE}/" > all-urls.txt
 
-          # فقط از page-sitemap.xml استفاده می‌کنیم
-          SITEMAPS=(
-            "page-sitemap.xml"
-          )
-
-          for sm in "${SITEMAPS[@]}"
-          do
-
-            echo "Reading $sm"
-
-            curl -L -s "${SITE}/${sm}" \
+          echo "Reading page-sitemap.xml"
+          curl -L -s "${SITE}/page-sitemap.xml" \
             | xmlstarlet sel \
                 -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
                 -t \
@@ -63,89 +40,49 @@ jobs:
                 -n \
             >> all-urls.txt || true
 
-          done
-
           sort -u all-urls.txt -o all-urls.txt
-
           echo "========================="
           echo "Collected URLs"
           echo "========================="
-
           wc -l all-urls.txt
-
-          # برای تست، تعداد chunk‌ها را به ۲ کاهش می‌دهیم
-          split -n l/2 -d all-urls.txt chunk-
-
+          split -n l/8 -d all-urls.txt chunk-
           for f in chunk-* ; do
             mv "$f" "$f.txt"
           done
-
-          echo 'chunks=["0","1"]' >> "$GITHUB_OUTPUT"
-
+          echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
       - name: Upload URL chunks
-
         uses: actions/upload-artifact@v4
-
         with:
-
           name: url-chunks
-
           path: chunk-*.txt
-
 #############################################################
-
   download:
-
     needs: prepare
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 360
-
     strategy:
-
       fail-fast: false
-
       matrix:
-
         chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
-
     steps:
-
       - name: Download chunk list
-
         uses: actions/download-artifact@v4
-
         with:
-
           name: url-chunks
-
       - name: Install HTTrack
-
         run: |
-
           sudo apt-get update
-
           sudo apt-get install -y httrack tree
-
       - name: Download website
-
         shell: bash
-
         run: |
-
           mkdir -p "${OUTPUT}"
-
           URLFILE="chunk-0${{ matrix.chunk }}.txt"
-
           while read URL
-
           do
-
             echo "===================================="
             echo "$URL"
             echo "===================================="
-
             httrack \
               "$URL" \
               -O "${OUTPUT}" \
@@ -182,89 +119,97 @@ jobs:
               --connection-per-second=2 \
               --disable-security-limits \
               || true
-
           done < "$URLFILE"
-
       - name: Debug downloaded files
-
         shell: bash
-
         run: |
-
           echo "==============================="
           echo "Backup Tree"
           echo "==============================="
-
           tree -L 4 "${OUTPUT}" || true
-
           echo
           echo "==============================="
-          echo "Downloaded HTML files"
+          echo "Elementor CSS"
           echo "==============================="
-
-          find "${OUTPUT}" -name "*.html" | head -20 || true
-
+          find "${OUTPUT}" -iname "*elementor*" | head -100 || true
           echo
           echo "==============================="
-          echo "Total HTML files"
+          echo "Plugin CSS"
           echo "==============================="
-
-          find "${OUTPUT}" -name "*.html" | wc -l
-
-      - name: Upload Chunk
-
-        uses: actions/upload-artifact@v4
-
-        with:
-
-          name: backup-chunk-${{ matrix.chunk }}
-
-          path: backup/
-
-##############################################################
-
-  merge:
-
-    needs: download
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - uses: actions/checkout@v4
-
-      - name: Prepare folders
-
-        run: |
-
-          rm -rf backup
-
-          mkdir backup
-
-      - name: Download Artifacts
-
-        uses: actions/download-artifact@v4
-
-        with:
-
-          pattern: backup-chunk-*
-
-          merge-multiple: true
-
-          path: backup
-
-      - name: Remove HTTrack Cache
-
+          find "${OUTPUT}" -path "*wp-content/plugins*" -name "*.css" | sort | head -100 || true
+          echo
+          echo "==============================="
+          echo "Frontend CSS"
+          echo "==============================="
+          find "${OUTPUT}" -name "frontend*.css" || true
+          echo
+          echo "==============================="
+          echo "JS Files"
+          echo "==============================="
+          find "${OUTPUT}" -name "*.js" | wc -l
+          echo
+          echo "==============================="
+          echo "CSS Files"
+          echo "==============================="
+          find "${OUTPUT}" -name "*.css" | wc -l
+          echo
+          echo "==============================="
+          echo "Image Files"
+          echo "==============================="
+          find "${OUTPUT}" \( \
+              -iname "*.jpg" -o \
+              -iname "*.jpeg" -o \
+              -iname "*.png" -o \
+              -iname "*.gif" -o \
+              -iname "*.svg" -o \
+              -iname "*.webp" \
+          \) | wc -l
+      - name: Verify Elementor
         shell: bash
-
         run: |
-
+          FOUND=0
+          if find "${OUTPUT}" -name "frontend.min.css" | grep -q frontend.min.css
+          then
+            echo "frontend.min.css found"
+            FOUND=1
+          fi
+          if find "${OUTPUT}" -name "frontend-rtl.min.css" | grep -q frontend-rtl.min.css
+          then
+            echo "frontend-rtl.min.css found"
+            FOUND=1
+          fi
+          if [ "$FOUND" = "0" ]
+          then
+            echo "::error::Elementor CSS not downloaded"
+            exit 1
+          fi
+      - name: Upload Chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-chunk-${{ matrix.chunk }}
+          path: backup/
+##############################################################
+  merge:
+    needs: download
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare folders
+        run: |
+          rm -rf backup
+          mkdir backup
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backup-chunk-*
+          merge-multiple: true
+          path: backup
+      - name: Remove HTTrack Cache
+        shell: bash
+        run: |
           find backup -name "hts-cache*" -exec rm -rf {} +
-
           find backup -name "*.tmp" -delete
-
           find backup -name "*.lock" -delete
-
       - name: Fix absolute links
         shell: bash
         run: |
@@ -272,29 +217,85 @@ jobs:
           xargs -0 sed -i \
             -e 's#https://payab.ir#/#g' \
             -e 's#http://payab.ir#/#g'
-
       - name: Show statistics
-
         shell: bash
-
         run: |
-
+          echo "HTML"
+          find backup -name "*.html" | wc -l
+          echo
+          echo "CSS"
+          find backup -name "*.css" | wc -l
+          echo
+          echo "JS"
+          find backup -name "*.js" | wc -l
+          echo
+          echo "Images"
+          find backup \( \
+            -iname "*.jpg" -o \
+            -iname "*.jpeg" -o \
+            -iname "*.png" -o \
+            -iname "*.svg" -o \
+            -iname "*.gif" -o \
+            -iname "*.webp" \
+          \) | wc -l
+      - name: Verify downloaded website
+        shell: bash
+        run: |
+          echo "==============================="
+          echo "VERIFY WEBSITE"
+          echo "==============================="
+          HTML_COUNT=$(find backup -name "*.html" | wc -l)
+          CSS_COUNT=$(find backup -name "*.css" | wc -l)
+          JS_COUNT=$(find backup -name "*.js" | wc -l)
+          echo "HTML : $HTML_COUNT"
+          echo "CSS : $CSS_COUNT"
+          echo "JS : $JS_COUNT"
+          if [ "$HTML_COUNT" -lt 5 ]; then
+            echo "::error::Too few HTML files downloaded."
+            exit 1
+          fi
+          if [ "$CSS_COUNT" -lt 5 ]; then
+            echo "::error::Too few CSS files downloaded."
+            exit 1
+          fi
+      - name: Check empty CSS
+        shell: bash
+        run: |
+          echo "==============================="
+          echo "EMPTY CSS FILES"
+          echo "==============================="
+          EMPTY=$(find backup -name "*.css" -size 0)
+          if [ -n "$EMPTY" ]; then
+            echo "$EMPTY"
+            echo "::warning::Empty CSS files found."
+          else
+            echo "No empty CSS files."
+          fi
+      - name: Check broken HTML
+        shell: bash
+        run: |
+          echo "==============================="
+          echo "BROKEN LINKS"
+          echo "==============================="
+          grep -R "https://payab.ir" backup \
+            --include="*.html" \
+            || true
+      - name: Show final statistics
+        shell: bash
+        run: |
           echo "==============================="
           echo "FINAL REPORT"
           echo "==============================="
-
-          echo "HTML files:"
+          echo "Directories:"
+          find backup -type d | wc -l
+          echo "Files:"
+          find backup -type f | wc -l
+          echo "HTML:"
           find backup -name "*.html" | wc -l
-
-          echo
-          echo "CSS files:"
+          echo "CSS:"
           find backup -name "*.css" | wc -l
-
-          echo
-          echo "JS files:"
+          echo "JS:"
           find backup -name "*.js" | wc -l
-
-          echo
           echo "Images:"
           find backup \( \
             -iname "*.jpg" -o \
@@ -304,58 +305,23 @@ jobs:
             -iname "*.svg" -o \
             -iname "*.webp" \
           \) | wc -l
-
-      - name: Verify downloaded website
-
+      - name: Commit backup
         shell: bash
-
         run: |
-
-          echo "==============================="
-          echo "VERIFY WEBSITE"
-          echo "==============================="
-
-          HTML_COUNT=$(find backup -name "*.html" | wc -l)
-
-          echo "HTML : $HTML_COUNT"
-
-          if [ "$HTML_COUNT" -lt 1 ]; then
-            echo "::error::No HTML files downloaded!"
-            exit 1
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add backup
+          if git diff --cached --quiet
+          then
+            echo "No changes."
+            exit 0
           fi
-
-          echo "✅ Test successful!"
-
-      - name: Commit backup (optional - برای تست غیرفعال می‌کنیم)
-
-        shell: bash
-
+          git commit -m "Static backup $(date -u '+%Y-%m-%d %H:%M UTC')"
+      - name: Push repository
         run: |
-
-          echo "Test mode: Skipping commit"
-
-          # اگر می‌خواهید برای تست کامیت نشود، این بخش کامنت شده است
-
-          # git config user.name "github-actions[bot]"
-          # git config user.email "github-actions[bot]@users.noreply.github.com"
-          # 
-          # git add backup
-          # 
-          # if git diff --cached --quiet
-          # then
-          #   echo "No changes."
-          #   exit 0
-          # fi
-          # 
-          # git commit -m "Static backup (test) $(date -u '+%Y-%m-%d %H:%M UTC')"
-          # git push
-
+          git push
       - name: Finished
-
         run: |
-
           echo "==============================="
-          echo "✅ TEST BACKUP COMPLETED"
+          echo "STATIC BACKUP COMPLETED"
           echo "==============================="
-          echo "Only page-sitemap.xml was used"
-          echo "Check the artifacts for results"
