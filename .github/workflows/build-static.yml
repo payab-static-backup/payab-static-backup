@@ -35,17 +35,7 @@ jobs:
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          SITEMAPS=(
-            "post-sitemap.xml"
-            "page-sitemap.xml"
-            "ads-sitemap.xml"
-            "ads-sitemap2.xml"
-            "post_tag-sitemap.xml"
-            "ad_cat-sitemap.xml"
-            "building-news-sitemap.xml"
-            "moghararat-sitemap.xml"
-          )
-
+          SITEMAPS=("post-sitemap.xml" "page-sitemap.xml" "ads-sitemap.xml" "ads-sitemap2.xml" "post_tag-sitemap.xml" "ad_cat-sitemap.xml" "building-news-sitemap.xml" "moghararat-sitemap.xml")
           for SM in "${SITEMAPS[@]}"; do
             echo "Fetching ${SM} ..."
             curl -L -s --retry 3 --retry-delay 2 "${SITE}/${SM}" \
@@ -123,13 +113,12 @@ jobs:
           const https = require('https');
           const http = require('http');
           const { URL } = require('url');
-          const crypto = require('crypto');
 
           const OUTPUT = process.env.OUTPUT || 'backup';
           const CHUNK = process.env.CHUNK || '0';
           const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3');
 
-          const urlFile = `chunk-0${CHUNK}.txt`;
+          const urlFile = `chunk-${String(CHUNK).padStart(2, '0')}.txt`;
           const urls = fs.readFileSync(urlFile, 'utf8')
             .split('\n')
             .map(u => u.trim())
@@ -150,12 +139,7 @@ jobs:
               const u = new URL(clean);
               let p = u.pathname;
               if (p.endsWith('/')) p += 'index.html';
-              let rel=p.replace(/^\//,'');
-               if(rel.length>180){
-                 const ext=path.extname(rel);
-                 rel='longpaths/'+crypto.createHash('sha1').update(rel).digest('hex')+ext;
-               }
-               return path.join(OUTPUT, rel);
+              return path.join(OUTPUT, p.replace(/^\//, ''));
             } catch {
               return null;
             }
