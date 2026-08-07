@@ -15,7 +15,7 @@ env:
 
 jobs:
   # =====================================================
-  # 1. آماده‌سازی لیست صفحات (فقط page-sitemap)
+  # 1. آماده‌سازی لیست صفحات (همه sitemapها)
   # =====================================================
   prepare:
     runs-on: ubuntu-latest
@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet jq
 
       - name: Collect URLs
         id: split
@@ -35,10 +35,21 @@ jobs:
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          SITEMAPS=("post-sitemap.xml" "page-sitemap.xml" "ads-sitemap.xml" "ads-sitemap2.xml" "post_tag-sitemap.xml" "ad_cat-sitemap.xml" "building-news-sitemap.xml" "moghararat-sitemap.xml")
-          for SM in "${SITEMAPS[@]}"; do
-            echo "Fetching ${SM} ..."
-            curl -L -s --retry 3 --retry-delay 2 "${SITE}/${SM}" \
+          # لیست تمام sitemapها
+          SITEMAPS=(
+            "page-sitemap.xml"
+            "post-sitemap.xml"
+            "ads-sitemap.xml"
+            "ads-sitemap2.xml"
+            "post_tag-sitemap.xml"
+            "ad_cat-sitemap.xml"
+            "building-news-sitemap.xml"
+            "moghararat-sitemap.xml"
+          )
+
+          for sitemap in "${SITEMAPS[@]}"; do
+            echo "Fetching ${sitemap} ..."
+            curl -L -s --retry 3 --retry-delay 2 "${SITE}/${sitemap}" \
               | xmlstarlet sel \
                   -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
                   -t -v "//x:loc" -n \
@@ -48,6 +59,7 @@ jobs:
           # فقط URLهای صفحات واقعی
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
+            | grep -v -E '(wp-content|wp-includes|wp-json|feed|comment|trackback)' \
             | sort -u > clean-urls.txt
           mv clean-urls.txt all-urls.txt
 
@@ -57,13 +69,15 @@ jobs:
           cat all-urls.txt
 
           TOTAL=$(wc -l < all-urls.txt)
-          if [ "$TOTAL" -le 16 ]; then
+          if [ "$TOTAL" -le 8 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
-            split -n l/16 -d all-urls.txt chunk-
+            split -n l/8 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
-            echo 'chunks=["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"]' >> "$GITHUB_OUTPUT"
+            # ایجاد آرایه JSON برای chunks
+            CHUNKS=$(seq 0 7 | jq -R -s -c 'split("\n") | map(select(length>0)) | map(tostring)')
+            echo "chunks=$CHUNKS" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Upload chunks
@@ -118,7 +132,8 @@ jobs:
           const CHUNK = process.env.CHUNK || '0';
           const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3');
 
-          const urlFile = `chunk-${String(CHUNK).padStart(2, '0')}.txt`;
+          const chunkNum = String(CHUNK).padStart(2, '0');
+          const urlFile = `chunk-${chunkNum}.txt`;
           const urls = fs.readFileSync(urlFile, 'utf8')
             .split('\n')
             .map(u => u.trim())
