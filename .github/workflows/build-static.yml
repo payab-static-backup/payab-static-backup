@@ -68,13 +68,14 @@ jobs:
           echo "..."
 
           TOTAL=$(wc -l < all-urls.txt)
-          if [ "$TOTAL" -le 8 ]; then
+          if [ "$TOTAL" -le 3 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
-            split -n l/8 -d all-urls.txt chunk-
+            # تقسیم به ۳ چانک موازی (فشار کمتر روی هاست)
+            split -n l/3 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
-            echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
+            echo 'chunks=["0","1","2"]' >> "$GITHUB_OUTPUT"
           fi
 
       - name: Upload chunks
@@ -85,7 +86,7 @@ jobs:
           retention-days: 1
 
   # =====================================================
-  # 2. دانلود موازی با Playwright (فشار کم روی هاست)
+  # 2. دانلود موازی با Playwright (حداکثر ۳ جاب همزمان)
   # =====================================================
   download:
     needs: prepare
