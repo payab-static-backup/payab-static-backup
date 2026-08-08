@@ -15,7 +15,7 @@ env:
 
 jobs:
   # =====================================================
-  # 1. آماده‌سازی لیست صفحات (همه sitemapها)
+  # 1. آماده‌سازی لیست صفحات از همه سایت‌مپ‌ها
   # =====================================================
   prepare:
     runs-on: ubuntu-latest
@@ -26,16 +26,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y xmlstarlet jq
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
 
-      - name: Collect URLs
+      - name: Collect URLs from all sitemaps
         id: split
         shell: bash
         run: |
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          # لیست تمام sitemapها
           SITEMAPS=(
             "page-sitemap.xml"
             "post-sitemap.xml"
@@ -47,37 +46,36 @@ jobs:
             "moghararat-sitemap.xml"
           )
 
-          for sitemap in "${SITEMAPS[@]}"; do
-            echo "Fetching ${sitemap} ..."
-            curl -L -s --retry 3 --retry-delay 2 "${SITE}/${sitemap}" \
+          for sm in "${SITEMAPS[@]}"; do
+            echo "Reading ${SITE}/${sm} ..."
+            curl -L -s --retry 3 --retry-delay 2 "${SITE}/${sm}" \
               | xmlstarlet sel \
                   -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
                   -t -v "//x:loc" -n \
               >> all-urls.txt || true
           done
 
-          # فقط URLهای صفحات واقعی
+          # فقط URLهای صفحات واقعی (حذف تصاویر و فایل‌های استاتیک)
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
-            | grep -v -E '(wp-content|wp-includes|wp-json|feed|comment|trackback)' \
             | sort -u > clean-urls.txt
           mv clean-urls.txt all-urls.txt
 
           echo "=============================="
-          echo "Collected URLs: $(wc -l < all-urls.txt)"
+          echo "Total unique URLs: $(wc -l < all-urls.txt)"
           echo "=============================="
-          cat all-urls.txt
+          head -30 all-urls.txt
+          echo "..."
 
           TOTAL=$(wc -l < all-urls.txt)
           if [ "$TOTAL" -le 8 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
+            # تقسیم به ۸ چانک موازی
             split -n l/8 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
-            # ایجاد آرایه JSON برای chunks
-            CHUNKS=$(seq 0 7 | jq -R -s -c 'split("\n") | map(select(length>0)) | map(tostring)')
-            echo "chunks=$CHUNKS" >> "$GITHUB_OUTPUT"
+            echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
           fi
 
       - name: Upload chunks
@@ -88,12 +86,12 @@ jobs:
           retention-days: 1
 
   # =====================================================
-  # 2. دانلود موازی با Playwright (مرورگر واقعی)
+  # 2. دانلود موازی با Playwright
   # =====================================================
   download:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -127,14 +125,12 @@ jobs:
           const https = require('https');
           const http = require('http');
           const { URL } = require('url');
-          const crypto = require('crypto');
 
           const OUTPUT = process.env.OUTPUT || 'backup';
           const CHUNK = process.env.CHUNK || '0';
           const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3');
 
-          const chunkNum = String(CHUNK).padStart(2, '0');
-          const urlFile = `chunk-${chunkNum}.txt`;
+          const urlFile = `chunk-0${CHUNK}.txt`;
           const urls = fs.readFileSync(urlFile, 'utf8')
             .split('\n')
             .map(u => u.trim())
@@ -155,20 +151,7 @@ jobs:
               const u = new URL(clean);
               let p = u.pathname;
               if (p.endsWith('/')) p += 'index.html';
-              
-              let localPath = path.join(OUTPUT, p.replace(/^\//, ''));
-              
-              // اگر مسیر خیلی طولانی است، آن را کوتاه کن
-              if (localPath.length > 200) {
-                const dir = path.dirname(localPath);
-                const ext = path.extname(localPath);
-                const name = path.basename(localPath, ext);
-                // از hash برای کوتاه کردن نام فایل استفاده کن
-                const hash = crypto.createHash('md5').update(localPath).digest('hex').substring(0, 16);
-                localPath = path.join(dir, hash + ext);
-              }
-              
-              return localPath;
+              return path.join(OUTPUT, p.replace(/^\//, ''));
             } catch {
               return null;
             }
@@ -184,7 +167,6 @@ jobs:
             const local = toLocal(clean);
             if (!local) return;
 
-            // فقط دامنه اصلی و CDNهای مجاز
             if (!clean.includes('payab.ir') &&
                 !clean.includes('googleapis.com') &&
                 !clean.includes('gstatic.com') &&
@@ -237,7 +219,6 @@ jobs:
             }
           }
 
-          // فایل‌های حیاتی (فقط آن‌هایی که احتمال وجود دارند)
           const critical = [
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css',
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css',
@@ -263,7 +244,6 @@ jobs:
               javaScriptEnabled: true
             });
 
-            // جمع‌آوری assetها (نادیده گرفتن blob و data)
             context.on('response', async (res) => {
               try {
                 const url = res.url();
@@ -290,21 +270,17 @@ jobs:
                 try {
                   const page = await context.newPage();
 
-                  // مهم: domcontentloaded به جای networkidle
                   await page.goto(pageUrl, {
                     waitUntil: 'domcontentloaded',
                     timeout: 45000
                   });
 
-                  // صبر برای اجرای کامل JavaScript و Elementor
                   await page.waitForTimeout(8000);
 
-                  // تلاش کوتاه برای networkidle
                   try {
                     await page.waitForLoadState('networkidle', { timeout: 8000 });
                   } catch {}
 
-                  // اسکرول برای لود lazy-load
                   await page.evaluate(async () => {
                     await new Promise(resolve => {
                       let total = 0;
@@ -325,12 +301,10 @@ jobs:
 
                   let html = await page.content();
 
-                  // پاکسازی لینک‌ها
                   html = html
                     .replace(/https?:\/\/payab\.ir\//g, '/')
                     .replace(/https?:\/\/www\.payab\.ir\//g, '/');
 
-                  // حذف query string از فایل‌های استاتیک
                   html = html.replace(
                     /(\/(?:wp-content|wp-includes)\/[^"'?\s]+?\.(?:css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico))\?[^"'>\s]*/gi,
                     '$1'
@@ -395,7 +369,7 @@ jobs:
         run: |
           echo "=============================="
           echo "HTML files:"
-          find backup -name "*.html" || true
+          find backup -name "*.html" | head -20 || true
           echo
           echo "CSS sample:"
           find backup -name "*.css" | head -25 || true
@@ -418,7 +392,7 @@ jobs:
           if-no-files-found: warn
 
   # =====================================================
-  # 3. ادغام + بررسی + Commit (بدون Deploy)
+  # 3. ادغام + بررسی + Commit
   # =====================================================
   merge:
     needs: download
@@ -503,7 +477,7 @@ jobs:
           fi
 
           if [ "$FRONTEND" -eq 0 ] && [ "$ELEM" -lt 1 ]; then
-            echo "::warning::No Elementor frontend CSS found (site may use different structure)"
+            echo "::warning::No Elementor frontend CSS found"
           fi
 
           if [ "$CSS" -lt 3 ]; then
@@ -528,7 +502,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Static backup $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Static backup (all sitemaps) $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
             echo "✓ Committed and pushed"
           fi
