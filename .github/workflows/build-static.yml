@@ -11,7 +11,7 @@ permissions:
 env:
   SITE: https://payab.ir
   OUTPUT: backup
-  MAX_RETRIES: 3
+  MAX_RETRIES: 2
 
 jobs:
   # =====================================================
@@ -55,7 +55,7 @@ jobs:
               >> all-urls.txt || true
           done
 
-          # فقط URLهای صفحات واقعی (حذف تصاویر و فایل‌های استاتیک)
+          # فقط URLهای صفحات واقعی
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
             | sort -u > clean-urls.txt
@@ -64,7 +64,7 @@ jobs:
           echo "=============================="
           echo "Total unique URLs: $(wc -l < all-urls.txt)"
           echo "=============================="
-          head -30 all-urls.txt
+          head -40 all-urls.txt
           echo "..."
 
           TOTAL=$(wc -l < all-urls.txt)
@@ -72,7 +72,6 @@ jobs:
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
-            # تقسیم به ۸ چانک موازی
             split -n l/8 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
             echo 'chunks=["0","1","2","3","4","5","6","7"]' >> "$GITHUB_OUTPUT"
@@ -86,7 +85,7 @@ jobs:
           retention-days: 1
 
   # =====================================================
-  # 2. دانلود موازی با Playwright
+  # 2. دانلود موازی با Playwright (فشار کم روی هاست)
   # =====================================================
   download:
     needs: prepare
@@ -128,7 +127,9 @@ jobs:
 
           const OUTPUT = process.env.OUTPUT || 'backup';
           const CHUNK = process.env.CHUNK || '0';
-          const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '3');
+          const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '2');
+          const DELAY_BETWEEN_PAGES = 3000;
+          const DELAY_BETWEEN_ASSETS = 400;
 
           const urlFile = `chunk-0${CHUNK}.txt`;
           const urls = fs.readFileSync(urlFile, 'utf8')
@@ -145,6 +146,10 @@ jobs:
             fs.mkdirSync(d, { recursive: true });
           }
 
+          function sleep(ms) {
+            return new Promise(r => setTimeout(r, ms));
+          }
+
           function toLocal(assetUrl) {
             try {
               const clean = assetUrl.split('?')[0];
@@ -157,8 +162,17 @@ jobs:
             }
           }
 
+          function shouldSkip(url) {
+            if (!url) return true;
+            if (url.startsWith('blob:') || url.startsWith('data:')) return true;
+            if (url.includes('cdn-cgi/')) return true;
+            if (url.includes('challenge-platform')) return true;
+            if (url.length > 240) return true;
+            return false;
+          }
+
           async function downloadAsset(assetUrl) {
-            if (!assetUrl || assetUrl.startsWith('blob:') || assetUrl.startsWith('data:')) return;
+            if (shouldSkip(assetUrl)) return;
 
             const clean = assetUrl.split('?')[0];
             if (downloaded.has(clean)) return;
@@ -172,8 +186,12 @@ jobs:
                 !clean.includes('gstatic.com') &&
                 !clean.includes('jsdelivr') &&
                 !clean.includes('fontawesome') &&
-                !clean.includes('bootstrapcdn') &&
-                !clean.includes('cloudflare')) {
+                !clean.includes('bootstrapcdn')) {
+              return;
+            }
+
+            if (local.length > 240) {
+              console.log('  ⚠ Path too long, skipped: ' + clean.substring(0, 80) + '...');
               return;
             }
 
@@ -184,7 +202,7 @@ jobs:
               try {
                 const proto = clean.startsWith('https') ? https : http;
                 await new Promise((resolve, reject) => {
-                  const req = proto.get(clean, { timeout: 20000 }, res => {
+                  const req = proto.get(clean, { timeout: 18000 }, res => {
                     if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                       downloadAsset(res.headers.location).then(resolve).catch(reject);
                       return;
@@ -199,6 +217,7 @@ jobs:
                       file.close();
                       resolve();
                     });
+                    file.on('error', reject);
                   });
                   req.on('error', reject);
                   req.on('timeout', () => {
@@ -207,13 +226,14 @@ jobs:
                   });
                 });
                 console.log('  ✓ ' + clean);
+                await sleep(DELAY_BETWEEN_ASSETS);
                 return;
               } catch (e) {
                 if (i === MAX_RETRIES - 1) {
                   console.log('  ✗ ' + clean + ' → ' + e.message);
                   failed.push(clean);
                 } else {
-                  await new Promise(r => setTimeout(r, 800 * (i + 1)));
+                  await sleep(1000 * (i + 1));
                 }
               }
             }
@@ -222,14 +242,14 @@ jobs:
           const critical = [
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css',
             'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css',
-            'https://payab.ir/wp-includes/js/jquery/jquery.min.js',
-            'https://payab.ir/wp-includes/js/jquery/jquery.js'
+            'https://payab.ir/wp-includes/js/jquery/jquery.min.js'
           ];
 
           (async () => {
             console.log('Downloading critical assets...');
             for (const a of critical) {
               await downloadAsset(a);
+              await sleep(500);
             }
 
             const browser = await chromium.launch({
@@ -247,7 +267,7 @@ jobs:
             context.on('response', async (res) => {
               try {
                 const url = res.url();
-                if (url.startsWith('blob:') || url.startsWith('data:')) return;
+                if (shouldSkip(url)) return;
 
                 const ct = (res.headers()['content-type'] || '').toLowerCase();
                 if (res.ok() && (
@@ -275,29 +295,29 @@ jobs:
                     timeout: 45000
                   });
 
-                  await page.waitForTimeout(8000);
+                  await page.waitForTimeout(6000);
 
                   try {
-                    await page.waitForLoadState('networkidle', { timeout: 8000 });
+                    await page.waitForLoadState('networkidle', { timeout: 6000 });
                   } catch {}
 
                   await page.evaluate(async () => {
                     await new Promise(resolve => {
                       let total = 0;
-                      const step = 600;
+                      const step = 700;
                       const timer = setInterval(() => {
                         window.scrollBy(0, step);
                         total += step;
-                        if (total >= Math.max(document.body.scrollHeight, 3000)) {
+                        if (total >= Math.max(document.body.scrollHeight, 2500)) {
                           clearInterval(timer);
                           window.scrollTo(0, 0);
                           resolve();
                         }
-                      }, 120);
+                      }, 150);
                     });
                   });
 
-                  await page.waitForTimeout(3000);
+                  await page.waitForTimeout(2500);
 
                   let html = await page.content();
 
@@ -322,6 +342,12 @@ jobs:
                     local += '.html';
                   }
 
+                  if (local.length > 240) {
+                    console.log('  ⚠ HTML path too long, skipped');
+                    await page.close();
+                    break;
+                  }
+
                   ensureDir(path.dirname(local));
                   fs.writeFileSync(local, html, 'utf8');
                   console.log('  ✓ Saved → ' + local);
@@ -332,7 +358,7 @@ jobs:
                 } catch (e) {
                   console.log('  ✗ Attempt ' + attempt + ': ' + e.message);
                   if (attempt < MAX_RETRIES) {
-                    await new Promise(r => setTimeout(r, 2500 * attempt));
+                    await sleep(3000 * attempt);
                   }
                 }
               }
@@ -340,6 +366,9 @@ jobs:
               if (!success) {
                 console.log('  !! Failed permanently: ' + pageUrl);
               }
+
+              // تأخیر برای کاهش فشار روی هاست اصلی
+              await sleep(DELAY_BETWEEN_PAGES);
             }
 
             await browser.close();
@@ -348,8 +377,8 @@ jobs:
             console.log('Downloaded assets: ' + downloaded.size);
             console.log('Failed assets: ' + failed.length);
             if (failed.length > 0) {
-              console.log('Failed list (first 30):');
-              failed.slice(0, 30).forEach(f => console.log('  - ' + f));
+              console.log('Failed list (first 20):');
+              failed.slice(0, 20).forEach(f => console.log('  - ' + f));
             }
             fs.writeFileSync('failed-assets-' + CHUNK + '.txt', failed.join('\n'));
           })().catch(e => {
@@ -368,7 +397,7 @@ jobs:
       - name: Debug
         run: |
           echo "=============================="
-          echo "HTML files:"
+          echo "HTML files (sample):"
           find backup -name "*.html" | head -20 || true
           echo
           echo "CSS sample:"
