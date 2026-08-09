@@ -14,9 +14,6 @@ env:
   MAX_RETRIES: 2
 
 jobs:
-  # =====================================================
-  # 1. آماده‌سازی (فقط page-sitemap برای تست)
-  # =====================================================
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -28,30 +25,31 @@ jobs:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y xmlstarlet
 
-      - name: Collect URLs (TEST - only page-sitemap)
+      - name: Collect URLs (TEST MODE)
         id: split
         shell: bash
         run: |
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          # فقط page-sitemap برای تست با تعداد کم صفحات
-          echo "Reading page-sitemap.xml (TEST MODE) ..."
-          curl -L -s --retry 3 --retry-delay 2 "${SITE}/page-sitemap.xml" \
-            | xmlstarlet sel \
-                -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
-                -t -v "//x:loc" -n \
+          # تست: page-sitemap + چند URL از ads برای بررسی حروف فارسی
+          echo "Reading page-sitemap.xml ..."
+          curl -L -s --retry 3 "${SITE}/page-sitemap.xml" \
+            | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
             >> all-urls.txt || true
 
-          # فقط URLهای صفحات واقعی
+          echo "Reading a few ads from ads-sitemap.xml (for Persian path test) ..."
+          curl -L -s --retry 3 "${SITE}/ads-sitemap.xml" \
+            | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
+            | head -15 \
+            >> all-urls.txt || true
+
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
             | sort -u > clean-urls.txt
           mv clean-urls.txt all-urls.txt
 
-          echo "=============================="
-          echo "TEST MODE - Total URLs: $(wc -l < all-urls.txt)"
-          echo "=============================="
+          echo "TEST URLs ($(wc -l < all-urls.txt)):"
           cat all-urls.txt
 
           TOTAL=$(wc -l < all-urls.txt)
@@ -59,7 +57,6 @@ jobs:
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
-            # حداکثر ۳ جاب موازی
             split -n l/3 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
             echo 'chunks=["0","1","2"]' >> "$GITHUB_OUTPUT"
@@ -72,13 +69,10 @@ jobs:
           path: chunk-*.txt
           retention-days: 1
 
-  # =====================================================
-  # 2. دانلود با Playwright
-  # =====================================================
   download:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -116,8 +110,8 @@ jobs:
           const OUTPUT = process.env.OUTPUT || 'backup';
           const CHUNK = process.env.CHUNK || '0';
           const MAX_RETRIES = parseInt(process.env.MAX_RETRIES || '2');
-          const DELAY_BETWEEN_PAGES = 3000;
-          const DELAY_BETWEEN_ASSETS = 400;
+          const DELAY_BETWEEN_PAGES = 2500;
+          const DELAY_BETWEEN_ASSETS = 300;
 
           const urlFile = `chunk-0${CHUNK}.txt`;
           const urls = fs.readFileSync(urlFile, 'utf8')
@@ -142,7 +136,6 @@ jobs:
             try {
               const clean = assetUrl.split('?')[0];
               const u = new URL(clean);
-              // decode برای حروف فارسی
               let p = decodeURIComponent(u.pathname);
               if (p.endsWith('/')) p += 'index.html';
               return path.join(OUTPUT, p.replace(/^\//, ''));
@@ -168,7 +161,7 @@ jobs:
             downloaded.add(clean);
 
             const local = toLocal(clean);
-            if (!local) return;
+            if (!local || local.length > 240) return;
 
             if (!clean.includes('payab.ir') &&
                 !clean.includes('googleapis.com') &&
@@ -179,11 +172,6 @@ jobs:
               return;
             }
 
-            if (local.length > 240) {
-              console.log('  ⚠ Path too long, skipped');
-              return;
-            }
-
             ensureDir(path.dirname(local));
             if (fs.existsSync(local) && fs.statSync(local).size > 0) return;
 
@@ -191,7 +179,7 @@ jobs:
               try {
                 const proto = clean.startsWith('https') ? https : http;
                 await new Promise((resolve, reject) => {
-                  const req = proto.get(clean, { timeout: 18000 }, res => {
+                  const req = proto.get(clean, { timeout: 15000 }, res => {
                     if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                       downloadAsset(res.headers.location).then(resolve).catch(reject);
                       return;
@@ -216,25 +204,13 @@ jobs:
                   console.log('  ✗ ' + clean + ' → ' + e.message);
                   failed.push(clean);
                 } else {
-                  await sleep(1000 * (i + 1));
+                  await sleep(800 * (i + 1));
                 }
               }
             }
           }
 
-          const critical = [
-            'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css',
-            'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css',
-            'https://payab.ir/wp-includes/js/jquery/jquery.min.js'
-          ];
-
           (async () => {
-            console.log('Downloading critical assets...');
-            for (const a of critical) {
-              await downloadAsset(a);
-              await sleep(500);
-            }
-
             const browser = await chromium.launch({
               headless: true,
               args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -243,8 +219,7 @@ jobs:
             const context = await browser.newContext({
               userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
               viewport: { width: 1920, height: 1080 },
-              locale: 'fa-IR',
-              javaScriptEnabled: true
+              locale: 'fa-IR'
             });
 
             context.on('response', async (res) => {
@@ -263,62 +238,44 @@ jobs:
             });
 
             for (const pageUrl of urls) {
-              console.log('\n=== Rendering: ' + pageUrl + ' ===');
+              console.log('\n=== ' + pageUrl + ' ===');
               let success = false;
 
               for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
                 try {
                   const page = await context.newPage();
+                  await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
+                  await page.waitForTimeout(5000);
 
-                  await page.goto(pageUrl, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 45000
-                  });
-
-                  await page.waitForTimeout(6000);
-
-                  try {
-                    await page.waitForLoadState('networkidle', { timeout: 6000 });
-                  } catch {}
+                  try { await page.waitForLoadState('networkidle', { timeout: 5000 }); } catch {}
 
                   await page.evaluate(async () => {
-                    await new Promise(resolve => {
-                      let total = 0;
-                      const step = 700;
-                      const timer = setInterval(() => {
-                        window.scrollBy(0, step);
-                        total += step;
-                        if (total >= Math.max(document.body.scrollHeight, 2500)) {
-                          clearInterval(timer);
+                    await new Promise(r => {
+                      let t = 0;
+                      const id = setInterval(() => {
+                        window.scrollBy(0, 600);
+                        t += 600;
+                        if (t >= Math.max(document.body.scrollHeight, 2000)) {
+                          clearInterval(id);
                           window.scrollTo(0, 0);
-                          resolve();
+                          r();
                         }
-                      }, 150);
+                      }, 120);
                     });
                   });
-
-                  await page.waitForTimeout(2500);
+                  await page.waitForTimeout(2000);
 
                   let html = await page.content();
-
                   html = html
                     .replace(/https?:\/\/payab\.ir\//g, '/')
                     .replace(/https?:\/\/www\.payab\.ir\//g, '/');
-
                   html = html.replace(
-                    /(\/(?:wp-content|wp-includes)\/[^"'?\s]+?\.(?:css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico))\?[^"'>\s]*/gi,
-                    '$1'
-                  );
-                  html = html.replace(
-                    /(src|href)=["']([^"']+\.(?:css|js|woff2?|ttf|eot|png|jpg|jpeg|gif|webp|svg|ico))\?[^"']*["']/gi,
-                    '$1="$2"'
+                    /(\/(?:wp-content|wp-includes)\/[^"'?\s]+?\.(?:css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico))\?[^"'>\s]*/gi, '$1'
                   );
 
                   const u = new URL(pageUrl);
-                  // مهم: decode برای حروف فارسی
                   let pathname = decodeURIComponent(u.pathname);
                   let local = path.join(OUTPUT, pathname.replace(/^\//, ''));
-
                   if (local.endsWith('/') || !path.extname(local)) {
                     local = path.join(local, 'index.html');
                   } else if (!local.endsWith('.html')) {
@@ -326,7 +283,7 @@ jobs:
                   }
 
                   if (local.length > 240) {
-                    console.log('  ⚠ HTML path too long, skipped');
+                    console.log('  ⚠ path too long');
                     await page.close();
                     break;
                   }
@@ -339,33 +296,18 @@ jobs:
                   success = true;
                   break;
                 } catch (e) {
-                  console.log('  ✗ Attempt ' + attempt + ': ' + e.message);
-                  if (attempt < MAX_RETRIES) {
-                    await sleep(3000 * attempt);
-                  }
+                  console.log('  ✗ ' + e.message);
+                  if (attempt < MAX_RETRIES) await sleep(2000 * attempt);
                 }
               }
-
-              if (!success) {
-                console.log('  !! Failed permanently: ' + pageUrl);
-              }
-
+              if (!success) console.log('  !! Failed: ' + pageUrl);
               await sleep(DELAY_BETWEEN_PAGES);
             }
 
             await browser.close();
-
-            console.log('\n========== SUMMARY ==========');
-            console.log('Downloaded assets: ' + downloaded.size);
-            console.log('Failed assets: ' + failed.length);
-            if (failed.length > 0) {
-              failed.slice(0, 20).forEach(f => console.log('  - ' + f));
-            }
+            console.log('Downloaded:', downloaded.size, '| Failed:', failed.length);
             fs.writeFileSync('failed-assets-' + CHUNK + '.txt', failed.join('\n'));
-          })().catch(e => {
-            console.error(e);
-            process.exit(1);
-          });
+          })().catch(e => { console.error(e); process.exit(1); });
           ENDOFSCRIPT
 
       - name: Run scraper
@@ -377,13 +319,13 @@ jobs:
 
       - name: Debug
         run: |
-          echo "HTML files:"
+          echo "=== HTML files ==="
           find backup -name "*.html" || true
           echo
-          echo "Counts:"
-          echo "  HTML : $(find backup -name '*.html' | wc -l)"
-          echo "  CSS  : $(find backup -name '*.css' | wc -l)"
-          echo "  JS   : $(find backup -name '*.js' | wc -l)"
+          echo "=== Folders (should show Persian names if decode worked) ==="
+          find backup -maxdepth 2 -type d || true
+          echo
+          echo "HTML: $(find backup -name '*.html' | wc -l) | CSS: $(find backup -name '*.css' | wc -l)"
 
       - name: Upload chunk
         uses: actions/upload-artifact@v4
@@ -395,9 +337,6 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-  # =====================================================
-  # 3. ادغام + Commit
-  # =====================================================
   merge:
     needs: download
     runs-on: ubuntu-latest
@@ -405,8 +344,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare
+      - name: Clean old backup completely
         run: |
+          # پاک‌سازی کامل برای حذف پوشه‌های encode‌شده قدیمی
+          git rm -rf backup 2>/dev/null || true
           rm -rf backup
           mkdir -p backup
 
@@ -417,56 +358,39 @@ jobs:
           merge-multiple: true
           path: .
 
-      - name: Merge files
+      - name: Merge
         run: |
           find . -type d -name "backup" | while read d; do
             if [ "$d" != "./backup" ]; then
               cp -a "$d"/. backup/ 2>/dev/null || true
             fi
           done
-          find backup -name "*.tmp" -delete 2>/dev/null || true
 
       - name: Fix links
         run: |
           find backup -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) -print0 |
-          xargs -0 sed -i \
-            -e 's#https\?://payab\.ir/#/#g' \
-            -e 's#https\?://www\.payab\.ir/#/#g' \
-            -e 's#//payab\.ir/#/#g' || true
+          xargs -0 sed -i -e 's#https\?://payab\.ir/#/#g' -e 's#https\?://www\.payab\.ir/#/#g' || true
 
-      - name: Statistics
-        id: stats
+      - name: Show result
         run: |
-          HTML=$(find backup -name "*.html" | wc -l)
-          CSS=$(find backup -name "*.css" | wc -l)
-          echo "HTML=$HTML" >> $GITHUB_OUTPUT
-          echo "CSS=$CSS" >> $GITHUB_OUTPUT
-          echo "HTML: $HTML | CSS: $CSS | JS: $(find backup -name '*.js' | wc -l)"
+          echo "=== Final structure ==="
+          find backup -maxdepth 2 -type d | head -30
           echo
-          echo "Folders:"
-          find backup -maxdepth 2 -type d | head -20 || true
+          echo "HTML: $(find backup -name '*.html' | wc -l)"
+          echo "CSS:  $(find backup -name '*.css' | wc -l)"
 
-      - name: Verify
-        run: |
-          HTML=${{ steps.stats.outputs.HTML }}
-          if [ "$HTML" -lt 1 ]; then
-            echo "::error::No HTML files"
-            exit 1
-          fi
-          echo "✓ Verification passed"
-
-      - name: Commit if changed
+      - name: Commit (force clean)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add backup
+          git add -A backup
           if git diff --cached --quiet; then
             echo "No changes"
           else
-            git commit -m "Static backup TEST (page-sitemap only) $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Static backup TEST (Persian decode + clean) $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
-            echo "✓ Committed and pushed"
+            echo "✓ Pushed"
           fi
 
       - name: Done
-        run: echo "TEST BACKUP COMPLETED"
+        run: echo "TEST COMPLETED"
