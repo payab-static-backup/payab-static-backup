@@ -14,6 +14,9 @@ env:
   MAX_RETRIES: 2
 
 jobs:
+  # =====================================================
+  # 1. آماده‌سازی (فقط page-sitemap برای تست)
+  # =====================================================
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -25,46 +28,38 @@ jobs:
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y xmlstarlet
 
-      - name: Collect URLs from all sitemaps
+      - name: Collect URLs (TEST - only page-sitemap)
         id: split
         shell: bash
         run: |
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          SITEMAPS=(
-            "page-sitemap.xml"
-            "post-sitemap.xml"
-            "ads-sitemap.xml"
-            "ads-sitemap2.xml"
-            "post_tag-sitemap.xml"
-            "ad_cat-sitemap.xml"
-            "building-news-sitemap.xml"
-            "moghararat-sitemap.xml"
-          )
+          # فقط page-sitemap برای تست با تعداد کم صفحات
+          echo "Reading page-sitemap.xml (TEST MODE) ..."
+          curl -L -s --retry 3 --retry-delay 2 "${SITE}/page-sitemap.xml" \
+            | xmlstarlet sel \
+                -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
+                -t -v "//x:loc" -n \
+            >> all-urls.txt || true
 
-          for sm in "${SITEMAPS[@]}"; do
-            echo "Reading ${SITE}/${sm} ..."
-            curl -L -s --retry 3 --retry-delay 2 "${SITE}/${sm}" \
-              | xmlstarlet sel \
-                  -N x="http://www.sitemaps.org/schemas/sitemap/0.9" \
-                  -t -v "//x:loc" -n \
-              >> all-urls.txt || true
-          done
-
+          # فقط URLهای صفحات واقعی
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
             | sort -u > clean-urls.txt
           mv clean-urls.txt all-urls.txt
 
-          echo "Total unique URLs: $(wc -l < all-urls.txt)"
-          head -40 all-urls.txt
+          echo "=============================="
+          echo "TEST MODE - Total URLs: $(wc -l < all-urls.txt)"
+          echo "=============================="
+          cat all-urls.txt
 
           TOTAL=$(wc -l < all-urls.txt)
           if [ "$TOTAL" -le 3 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
+            # حداکثر ۳ جاب موازی
             split -n l/3 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
             echo 'chunks=["0","1","2"]' >> "$GITHUB_OUTPUT"
@@ -77,10 +72,13 @@ jobs:
           path: chunk-*.txt
           retention-days: 1
 
+  # =====================================================
+  # 2. دانلود با Playwright
+  # =====================================================
   download:
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -144,7 +142,7 @@ jobs:
             try {
               const clean = assetUrl.split('?')[0];
               const u = new URL(clean);
-              // decode برای پشتیبانی از حروف فارسی
+              // decode برای حروف فارسی
               let p = decodeURIComponent(u.pathname);
               if (p.endsWith('/')) p += 'index.html';
               return path.join(OUTPUT, p.replace(/^\//, ''));
@@ -317,7 +315,7 @@ jobs:
                   );
 
                   const u = new URL(pageUrl);
-                  // مهم: decode کردن pathname برای حروف فارسی
+                  // مهم: decode برای حروف فارسی
                   let pathname = decodeURIComponent(u.pathname);
                   let local = path.join(OUTPUT, pathname.replace(/^\//, ''));
 
@@ -379,8 +377,8 @@ jobs:
 
       - name: Debug
         run: |
-          echo "HTML sample:"
-          find backup -name "*.html" | head -20 || true
+          echo "HTML files:"
+          find backup -name "*.html" || true
           echo
           echo "Counts:"
           echo "  HTML : $(find backup -name '*.html' | wc -l)"
@@ -397,6 +395,9 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
+  # =====================================================
+  # 3. ادغام + Commit
+  # =====================================================
   merge:
     needs: download
     runs-on: ubuntu-latest
@@ -442,8 +443,8 @@ jobs:
           echo "CSS=$CSS" >> $GITHUB_OUTPUT
           echo "HTML: $HTML | CSS: $CSS | JS: $(find backup -name '*.js' | wc -l)"
           echo
-          echo "Sample ads folders:"
-          find backup/ads -maxdepth 1 -type d | head -15 || true
+          echo "Folders:"
+          find backup -maxdepth 2 -type d | head -20 || true
 
       - name: Verify
         run: |
@@ -462,10 +463,10 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes"
           else
-            git commit -m "Static backup (Persian paths fixed) $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Static backup TEST (page-sitemap only) $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
             echo "✓ Committed and pushed"
           fi
 
       - name: Done
-        run: echo "STATIC BACKUP COMPLETED"
+        run: echo "TEST BACKUP COMPLETED"
