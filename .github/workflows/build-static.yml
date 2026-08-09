@@ -29,12 +29,11 @@ jobs:
           rm -f all-urls.txt
           echo "${SITE}/" > all-urls.txt
 
-          # page-sitemap
           curl -L -s --retry 3 "${SITE}/page-sitemap.xml" \
             | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
             >> all-urls.txt || true
 
-          # فقط ۱۰ آگهی اول برای تست حروف فارسی
+          # ۱۰ آگهی برای تست حروف فارسی
           curl -L -s --retry 3 "${SITE}/ads-sitemap.xml" \
             | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
             | head -10 \
@@ -88,8 +87,6 @@ jobs:
           const { chromium } = require('playwright');
           const fs = require('fs');
           const path = require('path');
-          const https = require('https');
-          const http = require('http');
           const { URL } = require('url');
 
           const OUTPUT = 'backup';
@@ -105,7 +102,6 @@ jobs:
           function makeLocalPath(pageUrl) {
             const u = new URL(pageUrl);
             let p = u.pathname;
-            // decode کامل
             try { p = decodeURIComponent(p); } catch {}
             p = p.replace(/^\//, '');
             if (!p || p.endsWith('/')) p = path.join(p, 'index.html');
@@ -159,9 +155,9 @@ jobs:
       - name: Show created folders
         run: |
           echo "=== Created structure ==="
-          find backup -type d | head -40
+          find backup -type d | head -40 || true
           echo
-          find backup -name "*.html"
+          find backup -name "*.html" || true
 
       - name: Upload
         uses: actions/upload-artifact@v4
@@ -175,37 +171,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clean
-        run: rm -rf backup && mkdir backup
+      - name: Prepare backup folder
+        run: |
+          rm -rf backup
+          mkdir -p backup
 
-      - uses: actions/download-artifact@v4
+      - name: Download artifacts directly into backup
+        uses: actions/download-artifact@v4
         with:
           pattern: backup-chunk-*
           merge-multiple: true
-          path: .
+          path: backup
 
-      - name: Merge
+      - name: Show final structure
         run: |
-          find . -type d -name "backup" | while read d; do
-            [ "$d" != "./backup" ] && cp -a "$d"/. backup/ || true
-          done
-
-      - name: Show final
-        run: |
-          echo "=== Final folders ==="
-          find backup -type d | head -30
+          echo "=== Final structure ==="
+          find backup -type d | head -40
           echo
-          find backup -name "index.html"
+          echo "HTML files:"
+          find backup -name "*.html"
+          echo
+          echo "Count HTML: $(find backup -name '*.html' | wc -l)"
+
+      - name: Fix links
+        run: |
+          find backup -type f -name "*.html" -print0 |
+          xargs -0 sed -i -e 's#https\?://payab\.ir/#/#g' -e 's#https\?://www\.payab\.ir/#/#g' || true
 
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          
           git add backup
           git status
+          
           if git diff --cached --quiet; then
-            echo "No changes"
+            echo "No changes to commit"
           else
-            git commit -m "Clean test backup with Persian folder names"
+            git commit -m "Clean test backup with Persian folder names $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
+            echo "✓ Committed and pushed"
           fi
