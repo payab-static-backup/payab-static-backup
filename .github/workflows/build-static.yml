@@ -1,4 +1,4 @@
-name: Clean Backup Folder
+name: Build Static Backup
 
 on:
   workflow_dispatch:
@@ -6,22 +6,206 @@ on:
 permissions:
   contents: write
 
+env:
+  SITE: https://payab.ir
+  OUTPUT: backup
+  MAX_RETRIES: 2
+
 jobs:
-  clean:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      chunks: ${{ steps.split.outputs.chunks }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+      - name: Collect test URLs
+        id: split
+        shell: bash
+        run: |
+          rm -f all-urls.txt
+          echo "${SITE}/" > all-urls.txt
+
+          # page-sitemap
+          curl -L -s --retry 3 "${SITE}/page-sitemap.xml" \
+            | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
+            >> all-urls.txt || true
+
+          # فقط ۱۰ آگهی اول برای تست حروف فارسی
+          curl -L -s --retry 3 "${SITE}/ads-sitemap.xml" \
+            | xmlstarlet sel -N x="http://www.sitemaps.org/schemas/sitemap/0.9" -t -v "//x:loc" -n \
+            | head -10 \
+            >> all-urls.txt || true
+
+          grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
+            | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
+            | sort -u > clean-urls.txt
+          mv clean-urls.txt all-urls.txt
+
+          echo "Test URLs:"
+          cat all-urls.txt
+          echo "Total: $(wc -l < all-urls.txt)"
+
+          cp all-urls.txt chunk-00.txt
+          echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
+
+      - name: Upload chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: url-chunks
+          path: chunk-*.txt
+
+  download:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      matrix:
+        chunk: ${{ fromJson(needs.prepare.outputs.chunks) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: url-chunks
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Create scraper
+        run: |
+          cat > scrape.js << 'ENDOFSCRIPT'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const path = require('path');
+          const https = require('https');
+          const http = require('http');
+          const { URL } = require('url');
+
+          const OUTPUT = 'backup';
+          const CHUNK = process.env.CHUNK || '0';
+          const urls = fs.readFileSync(`chunk-0${CHUNK}.txt`, 'utf8')
+            .split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+
+          console.log('URLs:', urls.length);
+
+          function ensureDir(d) { fs.mkdirSync(d, { recursive: true }); }
+          function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+          function makeLocalPath(pageUrl) {
+            const u = new URL(pageUrl);
+            let p = u.pathname;
+            // decode کامل
+            try { p = decodeURIComponent(p); } catch {}
+            p = p.replace(/^\//, '');
+            if (!p || p.endsWith('/')) p = path.join(p, 'index.html');
+            else if (!path.extname(p)) p = p + '/index.html';
+            return path.join(OUTPUT, p);
+          }
+
+          (async () => {
+            const browser = await chromium.launch({
+              headless: true,
+              args: ['--no-sandbox']
+            });
+            const context = await browser.newContext({
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              locale: 'fa-IR'
+            });
+
+            for (const pageUrl of urls) {
+              console.log('\n===', pageUrl);
+              try {
+                const page = await context.newPage();
+                await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
+                await page.waitForTimeout(5000);
+
+                let html = await page.content();
+                html = html.replace(/https?:\/\/payab\.ir\//g, '/')
+                           .replace(/https?:\/\/www\.payab\.ir\//g, '/');
+
+                const local = makeLocalPath(pageUrl);
+                console.log('  Saving to:', local);
+
+                ensureDir(path.dirname(local));
+                fs.writeFileSync(local, html, 'utf8');
+                console.log('  ✓ Saved');
+
+                await page.close();
+              } catch (e) {
+                console.log('  ✗', e.message);
+              }
+              await sleep(2000);
+            }
+            await browser.close();
+          })().catch(e => { console.error(e); process.exit(1); });
+          ENDOFSCRIPT
+
+      - name: Run
+        env:
+          CHUNK: ${{ matrix.chunk }}
+        run: node scrape.js
+
+      - name: Show created folders
+        run: |
+          echo "=== Created structure ==="
+          find backup -type d | head -40
+          echo
+          find backup -name "*.html"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-chunk-${{ matrix.chunk }}
+          path: backup/
+
+  merge:
+    needs: download
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Remove entire backup folder
+      - name: Clean
+        run: rm -rf backup && mkdir backup
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: backup-chunk-*
+          merge-multiple: true
+          path: .
+
+      - name: Merge
+        run: |
+          find . -type d -name "backup" | while read d; do
+            [ "$d" != "./backup" ] && cp -a "$d"/. backup/ || true
+          done
+
+      - name: Show final
+        run: |
+          echo "=== Final folders ==="
+          find backup -type d | head -30
+          echo
+          find backup -name "index.html"
+
+      - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          if [ -d backup ]; then
-            git rm -rf backup
-            git commit -m "Remove old encoded backup folders completely"
-            git push
-            echo "✓ backup folder removed"
+          git add backup
+          git status
+          if git diff --cached --quiet; then
+            echo "No changes"
           else
-            echo "No backup folder found"
+            git commit -m "Clean test backup with Persian folder names"
+            git push
           fi
