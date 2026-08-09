@@ -87,36 +87,145 @@ jobs:
           const { chromium } = require('playwright');
           const fs = require('fs');
           const path = require('path');
+          const https = require('https');
+          const http = require('http');
           const { URL } = require('url');
 
           const OUTPUT = 'backup';
           const CHUNK = process.env.CHUNK || '0';
+          const MAX_RETRIES = 2;
+          const DELAY_BETWEEN_PAGES = 2500;
+
           const urls = fs.readFileSync(`chunk-0${CHUNK}.txt`, 'utf8')
             .split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
 
           console.log('URLs:', urls.length);
 
+          const downloaded = new Set();
+
           function ensureDir(d) { fs.mkdirSync(d, { recursive: true }); }
           function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-          function makeLocalPath(pageUrl) {
-            const u = new URL(pageUrl);
-            let p = u.pathname;
-            try { p = decodeURIComponent(p); } catch {}
-            p = p.replace(/^\//, '');
-            if (!p || p.endsWith('/')) p = path.join(p, 'index.html');
-            else if (!path.extname(p)) p = p + '/index.html';
-            return path.join(OUTPUT, p);
+          function makeLocalPath(inputUrl) {
+            try {
+              const u = new URL(inputUrl.split('?')[0]);
+              let p = u.pathname;
+              try { p = decodeURIComponent(p); } catch {}
+              p = p.replace(/^\//, '');
+              if (!p || p.endsWith('/')) p = path.join(p, 'index.html');
+              else if (!path.extname(p)) p = p + '/index.html';
+              return path.join(OUTPUT, p);
+            } catch {
+              return null;
+            }
+          }
+
+          function shouldSkip(url) {
+            if (!url) return true;
+            if (url.startsWith('blob:') || url.startsWith('data:')) return true;
+            if (url.includes('cdn-cgi/')) return true;
+            if (url.includes('challenge-platform')) return true;
+            if (url.length > 240) return true;
+            return false;
+          }
+
+          async function downloadAsset(assetUrl) {
+            if (shouldSkip(assetUrl)) return;
+
+            const clean = assetUrl.split('?')[0];
+            if (downloaded.has(clean)) return;
+            downloaded.add(clean);
+
+            if (!clean.includes('payab.ir') &&
+                !clean.includes('googleapis.com') &&
+                !clean.includes('gstatic.com') &&
+                !clean.includes('jsdelivr') &&
+                !clean.includes('fontawesome') &&
+                !clean.includes('bootstrapcdn')) {
+              return;
+            }
+
+            const local = makeLocalPath(clean);
+            if (!local || local.length > 240) return;
+
+            // برای assetها پسوند را حفظ کن (نه index.html)
+            let finalPath = local;
+            if (finalPath.endsWith('/index.html')) {
+              finalPath = finalPath.replace(/\/index\.html$/, '');
+            }
+
+            ensureDir(path.dirname(finalPath));
+            if (fs.existsSync(finalPath) && fs.statSync(finalPath).size > 0) return;
+
+            for (let i = 0; i < MAX_RETRIES; i++) {
+              try {
+                const proto = clean.startsWith('https') ? https : http;
+                await new Promise((resolve, reject) => {
+                  const req = proto.get(clean, { timeout: 15000 }, res => {
+                    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                      downloadAsset(res.headers.location).then(resolve).catch(reject);
+                      return;
+                    }
+                    if (res.statusCode !== 200) {
+                      reject(new Error('HTTP ' + res.statusCode));
+                      return;
+                    }
+                    const file = fs.createWriteStream(finalPath);
+                    res.pipe(file);
+                    file.on('finish', () => { file.close(); resolve(); });
+                    file.on('error', reject);
+                  });
+                  req.on('error', reject);
+                  req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+                });
+                console.log('  ✓ Asset:', clean);
+                return;
+              } catch (e) {
+                if (i === MAX_RETRIES - 1) {
+                  console.log('  ✗ Asset:', clean, '→', e.message);
+                } else {
+                  await sleep(800 * (i + 1));
+                }
+              }
+            }
           }
 
           (async () => {
+            // فایل‌های حیاتی
+            const critical = [
+              'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.css',
+              'https://payab.ir/wp-content/plugins/elementor/assets/css/frontend.min.css',
+              'https://payab.ir/wp-includes/js/jquery/jquery.min.js'
+            ];
+            for (const a of critical) {
+              await downloadAsset(a);
+              await sleep(300);
+            }
+
             const browser = await chromium.launch({
               headless: true,
               args: ['--no-sandbox']
             });
             const context = await browser.newContext({
               userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              locale: 'fa-IR'
+              locale: 'fa-IR',
+              viewport: { width: 1920, height: 1080 }
+            });
+
+            // جمع‌آوری CSS و JS از شبکه
+            context.on('response', async (res) => {
+              try {
+                const url = res.url();
+                if (shouldSkip(url)) return;
+                const ct = (res.headers()['content-type'] || '').toLowerCase();
+                if (res.ok() && (
+                  ct.includes('css') || ct.includes('javascript') || ct.includes('font') ||
+                  ct.includes('image') ||
+                  url.match(/\.(css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico)(\?|$)/i)
+                )) {
+                  await downloadAsset(url);
+                }
+              } catch {}
             });
 
             for (const pageUrl of urls) {
@@ -124,40 +233,72 @@ jobs:
               try {
                 const page = await context.newPage();
                 await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 40000 });
-                await page.waitForTimeout(5000);
+                await page.waitForTimeout(6000);
+
+                try { await page.waitForLoadState('networkidle', { timeout: 5000 }); } catch {}
+
+                // اسکرول برای لود lazy
+                await page.evaluate(async () => {
+                  await new Promise(r => {
+                    let t = 0;
+                    const id = setInterval(() => {
+                      window.scrollBy(0, 600);
+                      t += 600;
+                      if (t >= Math.max(document.body.scrollHeight, 2000)) {
+                        clearInterval(id);
+                        window.scrollTo(0, 0);
+                        r();
+                      }
+                    }, 120);
+                  });
+                });
+                await page.waitForTimeout(2000);
 
                 let html = await page.content();
-                html = html.replace(/https?:\/\/payab\.ir\//g, '/')
-                           .replace(/https?:\/\/www\.payab\.ir\//g, '/');
+                html = html
+                  .replace(/https?:\/\/payab\.ir\//g, '/')
+                  .replace(/https?:\/\/www\.payab\.ir\//g, '/');
+
+                // حذف query string از لینک‌های استاتیک
+                html = html.replace(
+                  /(\/(?:wp-content|wp-includes)\/[^"'?\s]+?\.(?:css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico))\?[^"'>\s]*/gi,
+                  '$1'
+                );
 
                 const local = makeLocalPath(pageUrl);
-                console.log('  Saving to:', local);
-
+                console.log('  Saving HTML →', local);
                 ensureDir(path.dirname(local));
                 fs.writeFileSync(local, html, 'utf8');
-                console.log('  ✓ Saved');
+                console.log('  ✓ HTML saved');
 
                 await page.close();
               } catch (e) {
                 console.log('  ✗', e.message);
               }
-              await sleep(2000);
+              await sleep(DELAY_BETWEEN_PAGES);
             }
+
             await browser.close();
+            console.log('Total assets downloaded:', downloaded.size);
           })().catch(e => { console.error(e); process.exit(1); });
           ENDOFSCRIPT
 
-      - name: Run
+      - name: Run scraper
         env:
           CHUNK: ${{ matrix.chunk }}
         run: node scrape.js
 
-      - name: Show created folders
+      - name: Debug
         run: |
-          echo "=== Created structure ==="
-          find backup -type d | head -40 || true
+          echo "=== Structure ==="
+          find backup -type d | head -30
           echo
-          find backup -name "*.html" || true
+          echo "HTML: $(find backup -name '*.html' | wc -l)"
+          echo "CSS:  $(find backup -name '*.css' | wc -l)"
+          echo "JS:   $(find backup -name '*.js' | wc -l)"
+          echo
+          echo "Sample CSS:"
+          find backup -name "*.css" | head -10
 
       - name: Upload
         uses: actions/upload-artifact@v4
@@ -171,45 +312,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare backup folder
+      - name: Prepare
         run: |
           rm -rf backup
           mkdir -p backup
 
-      - name: Download artifacts directly into backup
+      - name: Download artifacts into backup
         uses: actions/download-artifact@v4
         with:
           pattern: backup-chunk-*
           merge-multiple: true
           path: backup
 
-      - name: Show final structure
+      - name: Show result
         run: |
-          echo "=== Final structure ==="
-          find backup -type d | head -40
+          echo "HTML: $(find backup -name '*.html' | wc -l)"
+          echo "CSS:  $(find backup -name '*.css' | wc -l)"
+          echo "JS:   $(find backup -name '*.js' | wc -l)"
           echo
-          echo "HTML files:"
-          find backup -name "*.html"
-          echo
-          echo "Count HTML: $(find backup -name '*.html' | wc -l)"
+          find backup -name "*.css" | head -15
 
       - name: Fix links
         run: |
-          find backup -type f -name "*.html" -print0 |
-          xargs -0 sed -i -e 's#https\?://payab\.ir/#/#g' -e 's#https\?://www\.payab\.ir/#/#g' || true
+          find backup -type f \( -name "*.html" -o -name "*.css" -o -name "*.js" \) -print0 |
+          xargs -0 sed -i \
+            -e 's#https\?://payab\.ir/#/#g' \
+            -e 's#https\?://www\.payab\.ir/#/#g' || true
 
       - name: Commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
           git add backup
           git status
-          
           if git diff --cached --quiet; then
-            echo "No changes to commit"
+            echo "No changes"
           else
-            git commit -m "Clean test backup with Persian folder names $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Test backup with Persian paths + CSS/JS $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
-            echo "✓ Committed and pushed"
+            echo "✓ Pushed"
           fi
