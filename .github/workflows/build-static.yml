@@ -14,9 +14,6 @@ env:
   MAX_RETRIES: 2
 
 jobs:
-  # =====================================================
-  # 1. آماده‌سازی لیست صفحات از همه سایت‌مپ‌ها
-  # =====================================================
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -55,24 +52,19 @@ jobs:
               >> all-urls.txt || true
           done
 
-          # فقط URLهای صفحات واقعی
           grep -E '^https?://payab\.ir(/.*)?$' all-urls.txt \
             | grep -v -E '\.(jpg|jpeg|png|gif|webp|svg|css|js|woff|woff2|ttf|ico|pdf)(\?|$)' \
             | sort -u > clean-urls.txt
           mv clean-urls.txt all-urls.txt
 
-          echo "=============================="
           echo "Total unique URLs: $(wc -l < all-urls.txt)"
-          echo "=============================="
           head -40 all-urls.txt
-          echo "..."
 
           TOTAL=$(wc -l < all-urls.txt)
           if [ "$TOTAL" -le 3 ]; then
             cp all-urls.txt chunk-00.txt
             echo 'chunks=["0"]' >> "$GITHUB_OUTPUT"
           else
-            # تقسیم به ۳ چانک موازی (فشار کمتر روی هاست)
             split -n l/3 -d all-urls.txt chunk-
             for f in chunk-*; do mv "$f" "$f.txt"; done
             echo 'chunks=["0","1","2"]' >> "$GITHUB_OUTPUT"
@@ -85,9 +77,6 @@ jobs:
           path: chunk-*.txt
           retention-days: 1
 
-  # =====================================================
-  # 2. دانلود موازی با Playwright (حداکثر ۳ جاب همزمان)
-  # =====================================================
   download:
     needs: prepare
     runs-on: ubuntu-latest
@@ -155,7 +144,8 @@ jobs:
             try {
               const clean = assetUrl.split('?')[0];
               const u = new URL(clean);
-              let p = u.pathname;
+              // decode برای پشتیبانی از حروف فارسی
+              let p = decodeURIComponent(u.pathname);
               if (p.endsWith('/')) p += 'index.html';
               return path.join(OUTPUT, p.replace(/^\//, ''));
             } catch {
@@ -192,7 +182,7 @@ jobs:
             }
 
             if (local.length > 240) {
-              console.log('  ⚠ Path too long, skipped: ' + clean.substring(0, 80) + '...');
+              console.log('  ⚠ Path too long, skipped');
               return;
             }
 
@@ -214,17 +204,11 @@ jobs:
                     }
                     const file = fs.createWriteStream(local);
                     res.pipe(file);
-                    file.on('finish', () => {
-                      file.close();
-                      resolve();
-                    });
+                    file.on('finish', () => { file.close(); resolve(); });
                     file.on('error', reject);
                   });
                   req.on('error', reject);
-                  req.on('timeout', () => {
-                    req.destroy();
-                    reject(new Error('Timeout'));
-                  });
+                  req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
                 });
                 console.log('  ✓ ' + clean);
                 await sleep(DELAY_BETWEEN_ASSETS);
@@ -269,12 +253,9 @@ jobs:
               try {
                 const url = res.url();
                 if (shouldSkip(url)) return;
-
                 const ct = (res.headers()['content-type'] || '').toLowerCase();
                 if (res.ok() && (
-                  ct.includes('css') ||
-                  ct.includes('javascript') ||
-                  ct.includes('font') ||
+                  ct.includes('css') || ct.includes('javascript') || ct.includes('font') ||
                   ct.includes('image') ||
                   url.match(/\.(css|js|woff2?|ttf|eot|jpg|jpeg|png|gif|webp|svg|ico)(\?|$)/i)
                 )) {
@@ -336,7 +317,10 @@ jobs:
                   );
 
                   const u = new URL(pageUrl);
-                  let local = path.join(OUTPUT, u.pathname.replace(/^\//, ''));
+                  // مهم: decode کردن pathname برای حروف فارسی
+                  let pathname = decodeURIComponent(u.pathname);
+                  let local = path.join(OUTPUT, pathname.replace(/^\//, ''));
+
                   if (local.endsWith('/') || !path.extname(local)) {
                     local = path.join(local, 'index.html');
                   } else if (!local.endsWith('.html')) {
@@ -368,7 +352,6 @@ jobs:
                 console.log('  !! Failed permanently: ' + pageUrl);
               }
 
-              // تأخیر برای کاهش فشار روی هاست اصلی
               await sleep(DELAY_BETWEEN_PAGES);
             }
 
@@ -378,7 +361,6 @@ jobs:
             console.log('Downloaded assets: ' + downloaded.size);
             console.log('Failed assets: ' + failed.length);
             if (failed.length > 0) {
-              console.log('Failed list (first 20):');
               failed.slice(0, 20).forEach(f => console.log('  - ' + f));
             }
             fs.writeFileSync('failed-assets-' + CHUNK + '.txt', failed.join('\n'));
@@ -397,19 +379,13 @@ jobs:
 
       - name: Debug
         run: |
-          echo "=============================="
-          echo "HTML files (sample):"
+          echo "HTML sample:"
           find backup -name "*.html" | head -20 || true
-          echo
-          echo "CSS sample:"
-          find backup -name "*.css" | head -25 || true
           echo
           echo "Counts:"
           echo "  HTML : $(find backup -name '*.html' | wc -l)"
           echo "  CSS  : $(find backup -name '*.css' | wc -l)"
           echo "  JS   : $(find backup -name '*.js' | wc -l)"
-          echo "  Fonts: $(find backup \( -name '*.woff' -o -name '*.woff2' -o -name '*.ttf' \) | wc -l)"
-          echo "  Images: $(find backup \( -iname '*.jpg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.svg' -o -iname '*.gif' \) | wc -l)"
 
       - name: Upload chunk
         uses: actions/upload-artifact@v4
@@ -421,9 +397,6 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-  # =====================================================
-  # 3. ادغام + بررسی + Commit
-  # =====================================================
   merge:
     needs: download
     runs-on: ubuntu-latest
@@ -451,7 +424,6 @@ jobs:
             fi
           done
           find backup -name "*.tmp" -delete 2>/dev/null || true
-          find backup -name "*.lock" -delete 2>/dev/null || true
 
       - name: Fix links
         run: |
@@ -466,79 +438,34 @@ jobs:
         run: |
           HTML=$(find backup -name "*.html" | wc -l)
           CSS=$(find backup -name "*.css" | wc -l)
-          JS=$(find backup -name "*.js" | wc -l)
-
           echo "HTML=$HTML" >> $GITHUB_OUTPUT
           echo "CSS=$CSS" >> $GITHUB_OUTPUT
-          echo "JS=$JS" >> $GITHUB_OUTPUT
-
-          echo "=============================="
-          echo "FINAL STATISTICS"
-          echo "=============================="
-          echo "HTML   : $HTML"
-          echo "CSS    : $CSS"
-          echo "JS     : $JS"
-          echo "Fonts  : $(find backup \( -name '*.woff' -o -name '*.woff2' -o -name '*.ttf' \) | wc -l)"
-          echo "Images : $(find backup \( -iname '*.jpg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.svg' -o -iname '*.gif' \) | wc -l)"
-          echo "Files  : $(find backup -type f | wc -l)"
+          echo "HTML: $HTML | CSS: $CSS | JS: $(find backup -name '*.js' | wc -l)"
           echo
-          echo "Elementor / frontend CSS:"
-          find backup -iname "*frontend*.css" -o -iname "*widget-*.css" | head -20 || true
+          echo "Sample ads folders:"
+          find backup/ads -maxdepth 1 -type d | head -15 || true
 
-      - name: Verify critical assets
+      - name: Verify
         run: |
-          echo "=============================="
-          echo "VERIFICATION"
-          echo "=============================="
-
-          FRONTEND=$(find backup -name "frontend*.css" | wc -l)
-          ELEM=$(find backup -path "*elementor*" -name "*.css" | wc -l)
           HTML=${{ steps.stats.outputs.HTML }}
-          CSS=${{ steps.stats.outputs.CSS }}
-
-          echo "frontend*.css      : $FRONTEND"
-          echo "elementor CSS     : $ELEM"
-          echo "HTML files        : $HTML"
-          echo "CSS files         : $CSS"
-
           if [ "$HTML" -lt 1 ]; then
-            echo "::error::No HTML files found"
+            echo "::error::No HTML files"
             exit 1
           fi
-
-          if [ "$FRONTEND" -eq 0 ] && [ "$ELEM" -lt 1 ]; then
-            echo "::warning::No Elementor frontend CSS found"
-          fi
-
-          if [ "$CSS" -lt 3 ]; then
-            echo "::warning::Very few CSS files ($CSS)"
-          fi
-
-          if ls failed-assets-*.txt 1>/dev/null 2>&1; then
-            echo
-            echo "Some failed assets:"
-            cat failed-assets-*.txt | sort -u | head -30 || true
-          fi
-
-          echo "✓ Verification completed"
+          echo "✓ Verification passed"
 
       - name: Commit if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add backup
-
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No changes"
           else
-            git commit -m "Static backup (all sitemaps) $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Static backup (Persian paths fixed) $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
             echo "✓ Committed and pushed"
           fi
 
       - name: Done
-        run: |
-          echo "=============================="
-          echo "STATIC BACKUP COMPLETED"
-          echo "=============================="
+        run: echo "STATIC BACKUP COMPLETED"
